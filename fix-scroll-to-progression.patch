@@ -1,0 +1,13 @@
+diff --git a/Sources/Navigator/EPUB/EPUBReflowableSpreadView.swift b/Sources/Navigator/EPUB/EPUBReflowableSpreadView.swift
+index xxxxxxxxxxxx..xxxxxxxxxxxx 100644
+--- a/Sources/Navigator/EPUB/EPUBReflowableSpreadView.swift
++++ b/Sources/Navigator/EPUB/EPUBReflowableSpreadView.swift
+@@ -307,7 +307,7 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
+         } else {
+             // Always use LTR for consistent pagination regardless of original reading direction
+             let dir = "ltr"
+-            await evaluateScript("readium.scrollToPosition(\'\(progression)\', \'\(dir)\')")
++            await evaluateScript("window.scrollTo({left: (document.documentElement.scrollWidth - document.documentElement.clientWidth) * \(progression), behavior: 'smooth'})")
+             return true
+         }
+     }

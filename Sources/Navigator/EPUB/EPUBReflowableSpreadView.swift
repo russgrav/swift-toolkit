@@ -175,34 +175,98 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
         guard !viewModel.scroll else {
             return await super.go(to: direction, options: options)
         }
-
-        let factor: CGFloat = {
-            switch direction {
-            case .left:
-                return -1
-            case .right:
-                return 1
+        
+        // FIXED: Use our own JavaScript implementation for consistent LTR pagination
+        // regardless of the original document direction
+        switch direction {
+        case .left: // Always means previous page in our forced LTR model
+            // Use forcedLTR to override any RTL behavior in the content
+            let script = """
+            (function() {
+                // Force LTR pagination regardless of document direction
+                const forcedLTR = true;
+                // Get current scroll position
+                const currentOffset = window.scrollX;
+                // Get page width (viewport width)
+                const pageWidth = document.documentElement.clientWidth;
+                
+                // In LTR mode, scrollLeft means going to previous page
+                const newOffset = currentOffset - pageWidth;
+                
+                // Check if we can scroll (are we at the beginning?)
+                if (newOffset < 0) {
+                    return false;
+                }
+                
+                // Perform the scroll
+                window.scrollTo({
+                    left: newOffset,
+                    behavior: 'smooth'
+                });
+                
+                return true;
+            })();
+            """
+            
+            let result = await evaluateScript(script)
+            switch result {
+            case .success(let value):
+                if let success = value as? Bool, !success {
+                    return false
+                }
+                try? await Task.sleep(seconds: 0.3)
+                return true
+                
+            case .failure(let error):
+                log(.error, error)
+                return false
             }
-        }()
-
-        let offsetX = scrollView.bounds.width * factor
-        var newOffset = scrollView.contentOffset
-        newOffset.x += offsetX
-        let rounded = round(newOffset.x / offsetX) * offsetX
-        newOffset.x = rounded
-        guard 0 ..< scrollView.contentSize.width ~= newOffset.x else {
-            return false
+            
+        case .right: // Always means next page in our forced LTR model
+            // Use forcedLTR to override any RTL behavior in the content
+            let script = """
+            (function() {
+                // Force LTR pagination regardless of document direction
+                const forcedLTR = true;
+                // Get current scroll position
+                const currentOffset = window.scrollX;
+                // Get page width (viewport width)
+                const pageWidth = document.documentElement.clientWidth;
+                // Get total content width
+                const totalWidth = document.documentElement.scrollWidth;
+                
+                // In LTR mode, scrollRight means going to next page
+                const newOffset = currentOffset + pageWidth;
+                
+                // Check if we can scroll (are we at the end?)
+                if (newOffset >= totalWidth) {
+                    return false;
+                }
+                
+                // Perform the scroll
+                window.scrollTo({
+                    left: newOffset,
+                    behavior: 'smooth'
+                });
+                
+                return true;
+            })();
+            """
+            
+            let result = await evaluateScript(script)
+            switch result {
+            case .success(let value):
+                if let success = value as? Bool, !success {
+                    return false
+                }
+                try? await Task.sleep(seconds: 0.3)
+                return true
+                
+            case .failure(let error):
+                log(.error, error)
+                return false
+            }
         }
-
-        scrollView.setContentOffset(newOffset, animated: options.animated)
-
-        // This delay is only used when turning pages in a single resource if
-        // the page turn is animated. The delay is roughly the length of the
-        // animation.
-        // TODO: completion should be implemented using scroll view delegates
-        try? await Task.sleep(seconds: 0.3)
-
-        return true
     }
 
     // Location to scroll to in the resource once the page is loaded.
@@ -283,8 +347,26 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
             scrollView.contentOffset = contentOffset
             return true
         } else {
-            let dir = viewModel.readingProgression.rawValue
-            await evaluateScript("readium.scrollToPosition(\'\(progression)\', \'\(dir)\')")
+            // FIXED: Use direct window scrolling instead of readium function for consistent LTR behavior
+            // Calculate scroll position based on content width and progression
+            let script = """
+            (function() {
+                // Force LTR pagination regardless of document direction
+                // Calculate the scroll position directly from the progression
+                const maxScroll = document.documentElement.scrollWidth - document.documentElement.clientWidth;
+                const targetPosition = Math.max(0, Math.min(maxScroll, maxScroll * \(progression)));
+                
+                // Perform the scroll
+                window.scrollTo({
+                    left: targetPosition,
+                    behavior: 'smooth'
+                });
+                
+                return true;
+            })();
+            """
+            
+            await evaluateScript(script)
             return true
         }
     }
@@ -292,7 +374,31 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
     /// Scrolls at the tag with ID `tagID`.
     @discardableResult
     private func scroll(toTagID tagID: String) async -> Bool {
-        let result = await evaluateScript("readium.scrollToId(\'\(tagID)\');")
+        // FIXED: Use direct element scrolling instead of readium function for consistent LTR behavior
+        let script = """
+        (function() {
+            // Force LTR pagination regardless of document direction
+            const element = document.getElementById('\(tagID)');
+            if (!element) return false;
+            
+            // Get the element's position
+            const rect = element.getBoundingClientRect();
+            const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+            
+            // Calculate position to scroll to
+            const targetPosition = scrollLeft + rect.left;
+            
+            // Perform the scroll
+            window.scrollTo({
+                left: targetPosition,
+                behavior: 'smooth'
+            });
+            
+            return true;
+        })();
+        """
+        
+        let result = await evaluateScript(script)
         switch result {
         case let .success(value):
             return (value as? Bool) ?? false
@@ -308,7 +414,35 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
         guard let json = locator.jsonString else {
             return false
         }
-        let result = await evaluateScript("readium.scrollToLocator(\(json));")
+        // FIXED: Instead of relying on readium.scrollToLocator, we use our own implementation
+        // First, let readium find the element, then we'll handle the scrolling ourselves
+        let script = """
+        (function() {
+            // Force LTR pagination regardless of document direction
+            const locator = \(json);
+            
+            // Use readium's helper function to find the element
+            const element = readium.findLocator(locator);
+            if (!element) return false;
+            
+            // Get the element's position
+            const rect = element.getBoundingClientRect();
+            const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+            
+            // Calculate position to scroll to
+            const targetPosition = scrollLeft + rect.left;
+            
+            // Perform the scroll
+            window.scrollTo({
+                left: targetPosition,
+                behavior: 'smooth'
+            });
+            
+            return true;
+        })();
+        """
+        
+        let result = await evaluateScript(script)
         switch result {
         case let .success(value):
             return (value as? Bool) ?? false
@@ -373,6 +507,32 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
         // since there's no zooming capabilities. This doesn't prevent JavaScript to handle
         // double-tap manually.
         webView.removeDoubleTapGestureRecognizer()
+        
+        // ADDED: Configure the HTML content for horizontal pagination
+        // This will help ensure consistent LTR behavior
+        let configureScript = """
+        (function() {
+            // Force LTR text direction and horizontal writing mode on all content
+            // This ensures consistent pagination for all Japanese content
+            document.documentElement.style.direction = 'ltr';
+            document.documentElement.style.writingMode = 'horizontal-tb';
+            
+            // Apply to body as well to ensure it cascades
+            if (document.body) {
+                document.body.style.direction = 'ltr';
+                document.body.style.writingMode = 'horizontal-tb';
+            }
+            
+            // Ensure the page scrolls horizontally
+            document.documentElement.style.overflowX = 'auto';
+            document.documentElement.style.overflowY = 'hidden';
+            
+            return true;
+        })();
+        """
+        
+        // Execute the configuration script when page loads
+        webView.evaluateJavaScript(configureScript)
     }
 
     // MARK: - UIScrollViewDelegate

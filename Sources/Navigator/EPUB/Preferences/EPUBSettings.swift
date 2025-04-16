@@ -95,7 +95,8 @@ public struct EPUBSettings: ConfigurableSettings {
         self.typeScale = typeScale
         self.verticalText = verticalText
         self.wordSpacing = wordSpacing
-        cssLayout = CSSLayout(verticalText: verticalText, language: language, readingProgression: readingProgression)
+        // Force horizontal LTR layout for CSS regardless of the computed settings based on metadata/language.
+        cssLayout = CSSLayout(verticalText: false, language: language, readingProgression: .ltr)
     }
 
     init(preferences: EPUBPreferences, defaults: EPUBDefaults, metadata: Metadata) {

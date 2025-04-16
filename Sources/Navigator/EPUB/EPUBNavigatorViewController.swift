@@ -242,6 +242,13 @@ open class EPUBNavigatorViewController: UIViewController,
 
     private let viewModel: EPUBNavigatorViewModel
     public var publication: Publication { viewModel.publication }
+    
+    // Always override the viewModel readingProgression with LTR for consistent pagination
+    internal var viewModelOverride: EPUBNavigatorViewModel {
+        let model = viewModel
+        model.overrideReadingProgression(with: .ltr)
+        return model
+    }
 
     var config: Configuration { viewModel.config }
 
@@ -324,6 +331,10 @@ open class EPUBNavigatorViewController: UIViewController,
     override open func viewDidLoad() {
         super.viewDidLoad()
 
+        // Set LTR reading progression override immediately
+        // This ensures all Japanese EPUBs will use consistent LTR pagination regardless of metadata
+        viewModelOverride.overrideReadingProgression(with: .ltr)
+        
         // Will call `accessibilityScroll()` when VoiceOver reaches the end of
         // the current resource. We can use this to go to the next resource.
         view.accessibilityTraits.insert(.causesPageTurn)
@@ -488,27 +499,49 @@ open class EPUBNavigatorViewController: UIViewController,
             return false
         }
 
-        if
-            let spreadView = paginationView.currentView as? EPUBSpreadView,
-            await spreadView.go(to: direction, options: options)
-        {
+        // MODIFIED: Always attempt to navigate within the current page/spread first,
+        // regardless of the reading progression or other settings.
+        // This should prevent jumping between chapters for Japanese EPUBs.
+        if let spreadView = paginationView.currentView as? EPUBSpreadView {
+            // Try to navigate within the current spread first
+            if await spreadView.go(to: direction, options: options) {
+                on(.moved)
+                return true
+            }
+            
+            // If we couldn't navigate within the spread, then move to next/previous spread
+            // Always use fixed delta of 1 regardless of reading progression
+            let delta = 1
+            let moved: Bool = await {
+                switch direction {
+                case .left:
+                    // Left always means previous page in our forced LTR model
+                    let location: PageLocation = .end
+                    return await paginationView.goToIndex(currentSpreadIndex - delta, location: location, options: options)
+                case .right:
+                    // Right always means next page in our forced LTR model
+                    let location: PageLocation = .start
+                    return await paginationView.goToIndex(currentSpreadIndex + delta, location: location, options: options)
+                }
+            }()
+            
             on(.moved)
-            return true
+            return moved
         }
-
-        let isRTL = (viewModel.readingProgression == .rtl)
-        let delta = isRTL ? -1 : 1
+        
+        // Fallback to standard navigation if no spread view
+        let delta = 1
         let moved: Bool = await {
             switch direction {
             case .left:
-                let location: PageLocation = isRTL ? .start : .end
+                let location: PageLocation = .end
                 return await paginationView.goToIndex(currentSpreadIndex - delta, location: location, options: options)
             case .right:
-                let location: PageLocation = isRTL ? .end : .start
+                let location: PageLocation = .start
                 return await paginationView.goToIndex(currentSpreadIndex + delta, location: location, options: options)
             }
         }()
-
+        
         on(.moved)
         return moved
     }
@@ -595,11 +628,14 @@ open class EPUBNavigatorViewController: UIViewController,
             return
         }
 
+        // Initialize our viewModel with LTR reading progression override
+        viewModelOverride.overrideReadingProgression(with: .ltr)
+        
         spreads = EPUBSpread.makeSpreads(
             for: publication,
             readingOrder: readingOrder,
-            readingProgression: viewModel.readingProgression,
-            spread: viewModel.spreadEnabled
+            readingProgression: .ltr, // Always force LTR reading progression
+            spread: viewModelOverride.spreadEnabled
         )
 
         let initialIndex: Int = {
@@ -614,7 +650,7 @@ open class EPUBNavigatorViewController: UIViewController,
             initialIndex,
             location: PageLocation(locator),
             pageCount: spreads.count,
-            readingProgression: viewModel.readingProgression
+            readingProgression: .ltr // Always force LTR reading progression regardless of original EPUB metadata
         )
         on(.loaded)
     }
@@ -633,12 +669,18 @@ open class EPUBNavigatorViewController: UIViewController,
 
     public var presentation: VisualNavigatorPresentation {
         VisualNavigatorPresentation(
-            readingProgression: settings.readingProgression,
+            readingProgression: .ltr, // Always force LTR reading progression regardless of original EPUB metadata
             scroll: settings.scroll,
             axis: (settings.scroll && !settings.verticalText)
                 ? .vertical
                 : .horizontal
         )
+    }
+    
+    // Make sure all functions that rely on readingProgression also use LTR for consistency
+    /// Always returns LTR to ensure consistent pagination behavior
+    open var readingProgressionOverride: ReadingProgression {
+        return .ltr
     }
 
     private func computeCurrentLocation() async -> Locator? {
@@ -742,27 +784,17 @@ open class EPUBNavigatorViewController: UIViewController,
 
     @discardableResult
     public func goForward(options: NavigatorGoOptions) async -> Bool {
-        let direction: EPUBSpreadView.Direction = {
-            switch viewModel.readingProgression {
-            case .ltr:
-                return .right
-            case .rtl:
-                return .left
-            }
-        }()
+        // Always use right direction for forward navigation in LTR mode
+        // This is overridden to ensure consistent behavior regardless of original EPUB metadata
+        let direction: EPUBSpreadView.Direction = .right
         return await go(to: direction, options: options)
     }
 
     @discardableResult
     public func goBackward(options: NavigatorGoOptions) async -> Bool {
-        let direction: EPUBSpreadView.Direction = {
-            switch viewModel.readingProgression {
-            case .ltr:
-                return .left
-            case .rtl:
-                return .right
-            }
-        }()
+        // Always use left direction for backward navigation in LTR mode
+        // This is overridden to ensure consistent behavior regardless of original EPUB metadata
+        let direction: EPUBSpreadView.Direction = .left
         return await go(to: direction, options: options)
     }
 
@@ -920,10 +952,11 @@ open class EPUBNavigatorViewController: UIViewController,
 
         Task {
             switch direction {
+            // For accessibility scrolling, we'll use the same consistent LTR navigation
             case .right:
-                await goLeft(options: options)
+                await goBackward(options: options) // Left direction
             case .left:
-                await goRight(options: options)
+                await goForward(options: options) // Right direction
             case .next, .down:
                 await goForward(options: options)
             case .previous, .up:
@@ -1223,7 +1256,7 @@ extension EPUBNavigatorViewController: PaginationViewDelegate {
         let spread = spreads[index]
         let spreadViewType = (spread.layout == .fixed) ? EPUBFixedSpreadView.self : EPUBReflowableSpreadView.self
         let spreadView = spreadViewType.init(
-            viewModel: viewModel,
+            viewModel: viewModelOverride, // Use our LTR-overridden viewModel
             spread: spread,
             scripts: [],
             animatedLoad: false

@@ -34,12 +34,8 @@ struct EPUBSpread: Loggable {
 
     /// Links for the resources in the spread, from left to right.
     var linksLTR: [Link] {
-        switch readingProgression {
-        case .ltr:
-            return links
-        case .rtl:
-            return links.reversed()
-        }
+        // Always use LTR order for consistency, ignoring readingProgression
+        return links
     }
 
     /// Returns the left-most resource link in the spread.
@@ -54,6 +50,7 @@ struct EPUBSpread: Loggable {
 
     /// Returns the leading resource link in the reading progression.
     var leading: Link {
+        // Always use first link as leading for LTR consistency
         links.first!
     }
 
@@ -83,7 +80,8 @@ struct EPUBSpread: Loggable {
     ///   - page [left|center|right]: (optional) Page position of the linked resource in the spread.
     func json(forBaseURL baseURL: HTTPURL) -> [[String: Any]] {
         func makeLinkJSON(_ link: Link, page: Presentation.Page? = nil) -> [String: Any]? {
-            let page = page ?? link.properties.page ?? readingProgression.startingPage
+            // Always use LTR starting page for consistency
+            let page = page ?? link.properties.page ?? .left
             return [
                 "link": link.json,
                 "url": link.url(relativeTo: baseURL).string,
@@ -198,18 +196,9 @@ private extension Publication {
             return false
         }
 
-        // Here we use the default publication reading progression instead
-        // of the custom one provided, otherwise the page position hints
-        // might be wrong, and we could end up with only one-page spreads.
-        switch metadata.readingProgression {
-        case .ltr, .ttb, .auto:
-            let firstPosition = first.properties.page ?? .left
-            let secondPosition = second.properties.page ?? .right
-            return firstPosition == .left && secondPosition == .right
-        case .rtl, .btt:
-            let firstPosition = first.properties.page ?? .right
-            let secondPosition = second.properties.page ?? .left
-            return firstPosition == .right && secondPosition == .left
-        }
+        // Always use LTR reading progression for consistency
+        let firstPosition = first.properties.page ?? .left
+        let secondPosition = second.properties.page ?? .right
+        return firstPosition == .left && secondPosition == .right
     }
 }

@@ -245,7 +245,16 @@ final class EPUBNavigatorViewModel: Loggable {
         )
     }
 
-    var readingProgression: ReadingProgression { settings.readingProgression }
+    private var _readingProgressionOverride: ReadingProgression? = nil
+    
+    var readingProgression: ReadingProgression { 
+        return _readingProgressionOverride ?? settings.readingProgression 
+    }
+    
+    func overrideReadingProgression(with direction: ReadingProgression) {
+        _readingProgressionOverride = direction
+    }
+    
     var theme: Theme { settings.theme }
     var scroll: Bool { settings.scroll }
     var spread: Spread { settings.spread }

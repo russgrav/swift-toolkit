@@ -131,6 +131,9 @@ extension ReadiumCSS: HTMLInjectable {
         // https://github.com/readium/r2-navigator-kotlin/issues/193
         inj.append(.style("audio[controls] { width: revert; height: revert; }"))
 
+        // Force horizontal writing mode to override publisher styles
+        inj.append(.style("html * { writing-mode: horizontal-tb !important; text-orientation: mixed !important; }"))
+
         return inj
     }
 
