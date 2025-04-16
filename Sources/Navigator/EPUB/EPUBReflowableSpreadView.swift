@@ -338,29 +338,63 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
             return false
         }
 
-        // Note: The JS layer does not take into account the scroll view's content inset. So it can't be used to reliably scroll to the top or the bottom of the page in scroll mode.
-        if viewModel.scroll, [0, 1].contains(progression) {
-            var contentOffset = scrollView.contentOffset
-            contentOffset.y = (progression == 0)
-                ? -scrollView.contentInset.top
-                : (scrollView.contentSize.height - scrollView.bounds.height + scrollView.contentInset.bottom)
-            scrollView.contentOffset = contentOffset
+        if viewModel.scroll {
+            // FIXED: For vertical scroll mode, save and restore vertical scroll position properly
+            let script = """
+            (function() {
+                // In scroll mode, we need to save and restore Y position
+                // Calculate the scroll position directly from the progression
+                const maxScrollY = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+                const targetPositionY = Math.max(0, Math.min(maxScrollY, maxScrollY * \(progression)));
+                
+                // Scroll vertically to the saved position
+                window.scrollTo({
+                    left: 0,
+                    top: targetPositionY,
+                    behavior: 'auto'
+                });
+                
+                // Make sure we trigger a progression update after scrolling
+                if (window.reportProgression) {
+                    setTimeout(window.reportProgression, 100);
+                }
+                
+                return true;
+            })();
+            """
+            
+            await evaluateScript(script)
             return true
         } else {
-            // FIXED: Use direct window scrolling instead of readium function for consistent LTR behavior
-            // Calculate scroll position based on content width and progression
+            // FIXED: For pagination mode, ensure we snap to page boundaries
+            // This ensures when restoring progress, we're properly aligned
             let script = """
             (function() {
                 // Force LTR pagination regardless of document direction
-                // Calculate the scroll position directly from the progression
-                const maxScroll = document.documentElement.scrollWidth - document.documentElement.clientWidth;
-                const targetPosition = Math.max(0, Math.min(maxScroll, maxScroll * \(progression)));
+                // Get page width (viewport width) for calculations
+                const pageWidth = document.documentElement.clientWidth;
+                const maxScroll = document.documentElement.scrollWidth - pageWidth;
                 
-                // Perform the scroll
+                // Calculate the raw scroll position from progression
+                let targetPosition = Math.max(0, Math.min(maxScroll, maxScroll * \(progression)));
+                
+                // Now adjust to snap to page boundaries - this is the key fix
+                // Calculate which page we should be on
+                const pageNumber = Math.floor(targetPosition / pageWidth);
+                
+                // Snap to exact page boundary
+                targetPosition = pageNumber * pageWidth;
+                
+                // Perform the scroll with 'auto' (not smooth) for immediate positioning
                 window.scrollTo({
                     left: targetPosition,
-                    behavior: 'smooth'
+                    behavior: 'auto'
                 });
+                
+                // Make sure we trigger a progression update after scrolling
+                if (window.reportProgression) {
+                    setTimeout(window.reportProgression, 100);
+                }
                 
                 return true;
             })();
@@ -384,15 +418,34 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
             // Get the element's position
             const rect = element.getBoundingClientRect();
             const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
             
-            // Calculate position to scroll to
-            const targetPosition = scrollLeft + rect.left;
+            // Determine if we're in scroll mode
+            const isVerticalScroll = \(viewModel.scroll);
             
-            // Perform the scroll
-            window.scrollTo({
-                left: targetPosition,
-                behavior: 'smooth'
-            });
+            if (isVerticalScroll) {
+                // Calculate position to scroll to vertically
+                const targetPosition = scrollTop + rect.top;
+                
+                // Perform the scroll
+                window.scrollTo({
+                    left: 0,
+                    top: targetPosition,
+                    behavior: 'smooth'
+                });
+            } else {
+                // Calculate position to scroll to horizontally
+                // For pagination, snap to page boundary
+                const pageWidth = document.documentElement.clientWidth;
+                const targetPage = Math.floor((scrollLeft + rect.left) / pageWidth);
+                const targetPosition = targetPage * pageWidth;
+                
+                // Perform the scroll
+                window.scrollTo({
+                    left: targetPosition,
+                    behavior: 'smooth'
+                });
+            }
             
             return true;
         })();
@@ -428,15 +481,34 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
             // Get the element's position
             const rect = element.getBoundingClientRect();
             const scrollLeft = window.pageXOffset || document.documentElement.scrollLeft;
+            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
             
-            // Calculate position to scroll to
-            const targetPosition = scrollLeft + rect.left;
+            // Determine if we're in scroll mode
+            const isVerticalScroll = \(viewModel.scroll);
             
-            // Perform the scroll
-            window.scrollTo({
-                left: targetPosition,
-                behavior: 'smooth'
-            });
+            if (isVerticalScroll) {
+                // Calculate position to scroll to vertically
+                const targetPosition = scrollTop + rect.top;
+                
+                // Perform the scroll
+                window.scrollTo({
+                    left: 0,
+                    top: targetPosition,
+                    behavior: 'smooth'
+                });
+            } else {
+                // Calculate position to scroll to horizontally
+                // For pagination, snap to page boundary
+                const pageWidth = document.documentElement.clientWidth;
+                const targetPage = Math.floor((scrollLeft + rect.left) / pageWidth);
+                const targetPosition = targetPage * pageWidth;
+                
+                // Perform the scroll
+                window.scrollTo({
+                    left: targetPosition,
+                    behavior: 'smooth'
+                });
+            }
             
             return true;
         })();
@@ -508,7 +580,7 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
         // double-tap manually.
         webView.removeDoubleTapGestureRecognizer()
         
-        // ADDED: Configure the HTML content for horizontal pagination
+        // FIXED: Configure the HTML content for horizontal pagination
         // This will help ensure consistent LTR behavior
         let configureScript = """
         (function() {
@@ -523,9 +595,96 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
                 document.body.style.writingMode = 'horizontal-tb';
             }
             
-            // Ensure the page scrolls horizontally
-            document.documentElement.style.overflowX = 'auto';
-            document.documentElement.style.overflowY = 'hidden';
+            // Configure scroll behavior based on mode
+            if (\(viewModel.scroll)) {
+                // Vertical Scroll Mode
+                document.documentElement.style.height = '100%';
+                document.body.style.height = 'auto';
+                document.body.style.margin = '0';
+                document.body.style.padding = '0';
+                
+                // Enable vertical scrolling
+                document.documentElement.style.overflowY = 'auto';
+                document.documentElement.style.overflowX = 'hidden';
+            } else {
+                // Horizontal Pagination Mode
+                document.documentElement.style.height = '100%';
+                document.body.style.height = '100%';
+                document.body.style.margin = '0';
+                document.body.style.padding = '0';
+                
+                // Enable horizontal pagination
+                document.documentElement.style.overflowY = 'hidden';
+                document.documentElement.style.overflowX = 'auto';
+            }
+            
+            // Set up improved progression tracking
+            let lastScrollTime = 0;
+            let scrollTimeoutId = null;
+            const SCROLL_INTERVAL = 250; // ms between progression updates
+            
+            // Function to calculate and report progression
+            function reportProgression() {
+                let progression;
+                const isVerticalScroll = \(viewModel.scroll);
+                
+                if (isVerticalScroll) {
+                    // Vertical scroll mode - track Y position
+                    const maxScrollY = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+                    if (maxScrollY <= 0) {
+                        progression = 0;
+                    } else {
+                        progression = window.scrollY / maxScrollY;
+                    }
+                } else {
+                    // Horizontal pagination mode - track X position
+                    const maxScrollX = document.documentElement.scrollWidth - document.documentElement.clientWidth;
+                    if (maxScrollX <= 0) {
+                        progression = 0;
+                    } else {
+                        progression = window.scrollX / maxScrollX;
+                    }
+                }
+                
+                // Clamp progression between 0 and 1
+                progression = Math.max(0, Math.min(1, progression));
+                
+                // Report progression to native code
+                window.webkit.messageHandlers.progressionChanged.postMessage(progression.toString());
+            }
+            
+            // Throttled scroll event handler
+            function onScroll() {
+                const now = Date.now();
+                
+                // Avoid too frequent updates
+                if (now - lastScrollTime < SCROLL_INTERVAL) {
+                    if (scrollTimeoutId) {
+                        clearTimeout(scrollTimeoutId);
+                    }
+                    
+                    scrollTimeoutId = setTimeout(function() {
+                        lastScrollTime = now;
+                        reportProgression();
+                        scrollTimeoutId = null;
+                    }, SCROLL_INTERVAL);
+                    
+                    return;
+                }
+                
+                lastScrollTime = now;
+                reportProgression();
+            }
+            
+            // Register event listeners
+            window.addEventListener('scroll', onScroll, { passive: true });
+            window.addEventListener('resize', reportProgression, { passive: true });
+            
+            // Initial report of progression
+            setTimeout(reportProgression, 200);
+            
+            // Make the function available globally to call when needed
+            window.reportProgression = reportProgression;
             
             return true;
         })();
