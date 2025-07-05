@@ -243,11 +243,30 @@ open class EPUBNavigatorViewController: UIViewController,
     private let viewModel: EPUBNavigatorViewModel
     public var publication: Publication { viewModel.publication }
     
+    // MARK: - Continuous Scroll Components
+    
+    /// Continuous scroll view for scroll mode
+    private var continuousScrollView: EPUBContinuousScrollView?
+    
+    /// Resource loader for continuous scroll mode
+    private var resourceLoader: EPUBContinuousResourceLoader?
+    
+    /// HTML builder for continuous scroll mode
+    private var htmlBuilder: EPUBContinuousHTMLBuilder?
+    
+    /// Current navigation mode
+    private enum NavigationMode {
+        case paginated  // Traditional resource-based pagination
+        case continuous // Continuous scroll mode
+    }
+    
+    private var currentNavigationMode: NavigationMode {
+        return settings.scroll ? .continuous : .paginated
+    }
+    
     // Always override the viewModel readingProgression with LTR for consistent pagination
     internal var viewModelOverride: EPUBNavigatorViewModel {
-        let model = viewModel
-        model.overrideReadingProgression(with: .ltr)
-        return model
+        return viewModel
     }
 
     var config: Configuration { viewModel.config }
@@ -333,7 +352,6 @@ open class EPUBNavigatorViewController: UIViewController,
 
         // Set LTR reading progression override immediately
         // This ensures all Japanese EPUBs will use consistent LTR pagination regardless of metadata
-        viewModelOverride.overrideReadingProgression(with: .ltr)
         
         // Will call `accessibilityScroll()` when VoiceOver reaches the end of
         // the current resource. We can use this to go to the next resource.
@@ -353,19 +371,90 @@ open class EPUBNavigatorViewController: UIViewController,
             log(.error, DebugError("Failed to load positions.", cause: error))
         }
 
-        paginationView = makePaginationView(
-            hasPositions: !positionsByReadingOrder.isEmpty
+        // Initialize continuous scroll components
+        resourceLoader = EPUBContinuousResourceLoader(
+            viewModel: viewModelOverride,
+            readingOrder: readingOrder
         )
-
-        paginationView!.frame = view.bounds
-        paginationView!.autoresizingMask = [.flexibleHeight, .flexibleWidth]
-        view.addSubview(paginationView!)
-
-        applySettings()
-
-        await _reloadSpreads(at: currentLocation, force: false)
-
+        htmlBuilder = EPUBContinuousHTMLBuilder(
+            viewModel: viewModelOverride,
+            readingOrder: readingOrder
+        )
+        
+        // Setup the appropriate navigation mode
+        await setupNavigationMode()
+        
         onInitializedCallbacks.complete()
+    }
+    
+    /// Setup navigation mode based on current settings
+    private func setupNavigationMode() async {
+        switch currentNavigationMode {
+        case .paginated:
+            await setupPaginatedMode()
+        case .continuous:
+            await setupContinuousMode()
+        }
+        
+        applySettings()
+    }
+    
+    /// Setup traditional paginated mode
+    private func setupPaginatedMode() async {
+        // Clean up continuous scroll if it exists
+        continuousScrollView?.removeFromSuperview()
+        continuousScrollView = nil
+        
+        // Setup pagination view
+        if paginationView == nil {
+            paginationView = makePaginationView(
+                hasPositions: !positionsByReadingOrder.isEmpty
+            )
+            paginationView!.frame = view.bounds
+            paginationView!.autoresizingMask = [.flexibleHeight, .flexibleWidth]
+            view.addSubview(paginationView!)
+        }
+        
+        await _reloadSpreads(at: currentLocation, force: false)
+    }
+    
+    /// Setup continuous scroll mode
+    private func setupContinuousMode() async {
+        // Clean up pagination view if it exists
+        paginationView?.removeFromSuperview()
+        paginationView = nil
+        
+        // Setup continuous scroll view
+        guard let resourceLoader = resourceLoader else {
+            log(.error, "Resource loader not initialized")
+            return
+        }
+        
+        continuousScrollView = EPUBContinuousScrollView(
+            viewModel: viewModelOverride,
+            readingOrder: readingOrder,
+            preloadCount: config.preloadPreviousPositionCount
+        )
+        
+        continuousScrollView!.delegate = self
+        continuousScrollView!.frame = view.bounds
+        continuousScrollView!.autoresizingMask = [.flexibleHeight, .flexibleWidth]
+        view.addSubview(continuousScrollView!)
+        
+        // Load content starting from current location
+        let startIndex = currentLocation
+            .flatMap { locator in readingOrder.firstIndex { $0.href == locator.href.string } }
+            ?? 0
+        
+        // FIX: Preload resources using the resource loader before setting up the scroll view
+        await resourceLoader.preloadResources(around: startIndex, preloadCount: config.preloadPreviousPositionCount)
+        
+        await continuousScrollView!.loadContent(startingAt: startIndex)
+        
+        // Navigate to current location if available
+        if let location = currentLocation {
+            await continuousScrollView!.scrollTo(locator: location, animated: false)
+        }
     }
 
     private let onInitializedCallbacks = CompletionList()
@@ -629,7 +718,6 @@ open class EPUBNavigatorViewController: UIViewController,
         }
 
         // Initialize our viewModel with LTR reading progression override
-        viewModelOverride.overrideReadingProgression(with: .ltr)
         
         spreads = EPUBSpread.makeSpreads(
             for: publication,
@@ -694,7 +782,16 @@ open class EPUBNavigatorViewController: UIViewController,
         if let pendingLocator = state.pendingLocator {
             return pendingLocator
         }
-
+        
+        switch currentNavigationMode {
+        case .paginated:
+            return await computePaginatedCurrentLocation()
+        case .continuous:
+            return await computeContinuousCurrentLocation()
+        }
+    }
+    
+    private func computePaginatedCurrentLocation() async -> Locator? {
         guard let spreadView = paginationView?.currentView as? EPUBSpreadView else {
             return nil
         }
@@ -722,6 +819,10 @@ open class EPUBNavigatorViewController: UIViewController,
                 locations: { $0.progression = progression }
             )
         }
+    }
+    
+    private func computeContinuousCurrentLocation() async -> Locator? {
+        return continuousScrollView?.getCurrentLocator()
     }
 
     public func firstVisibleElementLocator() async -> Locator? {
@@ -759,6 +860,15 @@ open class EPUBNavigatorViewController: UIViewController,
     public func go(to locator: Locator, options: NavigatorGoOptions) async -> Bool {
         let locator = publication.normalizeLocator(locator)
 
+        switch currentNavigationMode {
+        case .paginated:
+            return await goToPaginatedMode(locator: locator, options: options)
+        case .continuous:
+            return await goToContinuousMode(locator: locator, options: options)
+        }
+    }
+    
+    private func goToPaginatedMode(locator: Locator, options: NavigatorGoOptions) async -> Bool {
         guard
             let paginationView = paginationView,
             let spreadIndex = spreads.firstIndexWithHREF(locator.href),
@@ -774,6 +884,18 @@ open class EPUBNavigatorViewController: UIViewController,
         }
         return success
     }
+    
+    private func goToContinuousMode(locator: Locator, options: NavigatorGoOptions) async -> Bool {
+        guard let continuousScrollView = continuousScrollView else {
+            return false
+        }
+        
+        let success = await continuousScrollView.scrollTo(locator: locator, animated: options.animated)
+        if success {
+            delegate?.navigator(self, didJumpTo: locator)
+        }
+        return success
+    }
 
     public func go(to link: Link, options: NavigatorGoOptions) async -> Bool {
         guard let locator = await publication.locate(link) else {
@@ -784,18 +906,26 @@ open class EPUBNavigatorViewController: UIViewController,
 
     @discardableResult
     public func goForward(options: NavigatorGoOptions) async -> Bool {
-        // Always use right direction for forward navigation in LTR mode
-        // This is overridden to ensure consistent behavior regardless of original EPUB metadata
-        let direction: EPUBSpreadView.Direction = .right
-        return await go(to: direction, options: options)
+        switch currentNavigationMode {
+        case .paginated:
+            // Always use right direction for forward navigation in LTR mode
+            let direction: EPUBSpreadView.Direction = .right
+            return await go(to: direction, options: options)
+        case .continuous:
+            return await continuousScrollView?.scrollForward(animated: options.animated) ?? false
+        }
     }
 
     @discardableResult
     public func goBackward(options: NavigatorGoOptions) async -> Bool {
-        // Always use left direction for backward navigation in LTR mode
-        // This is overridden to ensure consistent behavior regardless of original EPUB metadata
-        let direction: EPUBSpreadView.Direction = .left
-        return await go(to: direction, options: options)
+        switch currentNavigationMode {
+        case .paginated:
+            // Always use left direction for backward navigation in LTR mode
+            let direction: EPUBSpreadView.Direction = .left
+            return await go(to: direction, options: options)
+        case .continuous:
+            return await continuousScrollView?.scrollBackward(animated: options.animated) ?? false
+        }
     }
 
     // MARK: - SelectableNavigator
@@ -894,8 +1024,20 @@ open class EPUBNavigatorViewController: UIViewController,
     public var settings: EPUBSettings { viewModel.settings }
 
     public func submitPreferences(_ preferences: EPUBPreferences) {
+        let oldNavigationMode = currentNavigationMode
         viewModel.submitPreferences(preferences)
-        applySettings()
+        
+        // Check if navigation mode changed
+        let newNavigationMode = currentNavigationMode
+        if oldNavigationMode != newNavigationMode {
+            // Navigation mode changed, need to switch modes
+            Task {
+                await setupNavigationMode()
+            }
+        } else {
+            // Same mode, just apply settings
+            applySettings()
+        }
 
         delegate?.navigator(self, presentationDidChange: presentation)
     }
@@ -1277,5 +1419,36 @@ extension EPUBNavigatorViewController: PaginationViewDelegate {
 
     func paginationView(_ paginationView: PaginationView, positionCountAtIndex index: Int) -> Int {
         spreads[index].positionCount(in: readingOrder, positionsByReadingOrder: positionsByReadingOrder)
+    }
+}
+
+// MARK: - EPUBContinuousScrollViewDelegate
+
+extension EPUBNavigatorViewController: EPUBContinuousScrollViewDelegate {
+    func continuousScrollViewDidLoad(_ scrollView: EPUBContinuousScrollView) {
+        log(.debug, "Continuous scroll view loaded")
+        // Apply any initial settings
+        scrollView.applySettings()
+    }
+    
+    func continuousScrollView(_ scrollView: EPUBContinuousScrollView, didScrollTo locator: Locator) {
+        // Update current location when scrolling in continuous mode
+        currentLocation = locator
+        
+        if let delegate = delegate, locator != notifiedCurrentLocation {
+            notifiedCurrentLocation = locator
+            delegate.navigator(self, locationDidChange: locator)
+        }
+    }
+    
+    func continuousScrollView(_ scrollView: EPUBContinuousScrollView, didTapAt point: CGPoint) {
+        // Convert point to navigator coordinate space
+        let convertedPoint = view.convert(point, from: scrollView)
+        delegate?.navigator(self, didTapAt: convertedPoint)
+    }
+    
+    func continuousScrollView(_ scrollView: EPUBContinuousScrollView, didEncounterError error: Error) {
+        log(.error, "Continuous scroll view error: \(error)")
+        // Could delegate this to the main navigator delegate if needed
     }
 }

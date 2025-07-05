@@ -68,10 +68,69 @@ public class GCDHTTPServer: HTTPServer, Loggable {
                 self?.handle(request: request, completion: completion)
             }
         )
+        
+        // FIX 5: Add fallback handler for missing assets (especially images)
+        setupAssetFallbackHandlers()
     }
 
     deinit {
         NotificationCenter.default.removeObserver(self)
+    }
+    
+    // FIX 5: Setup fallback handlers for missing assets
+    private func setupAssetFallbackHandlers() {
+        // Add a specific handler for common image paths that might be missing
+        server.addHandler(
+            forMethod: "GET",
+            pathRegex: ".*/images/.*\\.(jpg|jpeg|png|gif|svg|webp)$",
+            request: ReadiumGCDWebServerRequest.self
+        ) { [weak self] request in
+            self?.handleMissingImage(request: request)
+        }
+        
+        // Add handler for other common asset paths
+        server.addHandler(
+            forMethod: "GET",
+            pathRegex: ".*/assets/.*\\.(css|js|woff|woff2|ttf|otf)$",
+            request: ReadiumGCDWebServerRequest.self
+        ) { [weak self] request in
+            self?.handleMissingAsset(request: request)
+        }
+    }
+    
+    private func handleMissingImage(request: ReadiumGCDWebServerRequest) -> ReadiumGCDWebServerResponse? {
+        let path = request.url.path
+        log(.warning, "Missing image requested: \(path)")
+        
+        // Return a 1x1 transparent PNG for missing images
+        let transparentPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChAGGQGKsBQAAAABJRU5ErkJggg==")!
+        
+        return ReadiumGCDWebServerDataResponse(
+            data: transparentPNG,
+            contentType: "image/png"
+        )
+    }
+    
+    private func handleMissingAsset(request: ReadiumGCDWebServerRequest) -> ReadiumGCDWebServerResponse? {
+        let path = request.url.path
+        log(.warning, "Missing asset requested: \(path)")
+        
+        // Return appropriate empty content based on file type
+        
+        if path.hasSuffix(".css") {
+            return ReadiumGCDWebServerDataResponse(
+                data: "/* Asset not found */".data(using: .utf8) ?? Data(),
+                contentType: "text/css"
+            )
+        } else if path.hasSuffix(".js") {
+            return ReadiumGCDWebServerDataResponse(
+                data: "// Asset not found".data(using: .utf8) ?? Data(),
+                contentType: "application/javascript"
+            )
+        }
+        
+        // For fonts and other assets, return a 404 but log it
+        return ReadiumGCDWebServerErrorResponse(statusCode: 404)
     }
 
     @objc private func willEnterForeground(_ notification: Notification) {
@@ -285,7 +344,8 @@ public class GCDHTTPServer: HTTPServer, Loggable {
             throw GCDHTTPServerError.failedToStartServer(cause: error)
         }
 
-        guard let baseURL = server.serverURL?.httpURL else {
+        guard let serverURL = server.serverURL,
+              let baseURL = serverURL.httpURL else {
             stop()
             throw GCDHTTPServerError.nullServerURL
         }
@@ -367,7 +427,8 @@ private extension HTTPServerResponse {
             }
         }
 
-        if let mediaType = try? await assetRetriever.sniffFormat(of: resource).get().mediaType {
+        if let format = try? await assetRetriever.sniffFormat(of: resource).get(),
+           let mediaType = format.mediaType {
             return mediaType
         }
 
