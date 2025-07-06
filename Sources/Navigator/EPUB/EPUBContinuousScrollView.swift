@@ -313,6 +313,8 @@ final class EPUBContinuousScrollView: UIView, WKUIDelegate, UIGestureRecognizerD
         htmlContent += "</body></html>"
         
         await MainActor.run {
+            // Load with proper base URL for HTTP server routing
+            // Ensure the base URL matches the publication endpoint served by the HTTP server
             webView.loadHTMLString(htmlContent, baseURL: viewModel.publicationBaseURL.url)
         }
     }

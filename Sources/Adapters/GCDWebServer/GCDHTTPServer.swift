@@ -77,30 +77,18 @@ public class GCDHTTPServer: HTTPServer, Loggable {
         NotificationCenter.default.removeObserver(self)
     }
     
-    // FIX 5: Setup fallback handlers for missing assets
+    // DISABLED: Remove fallback handlers that interfere with publication serving
     private func setupAssetFallbackHandlers() {
-        // Add a specific handler for common image paths that might be missing
-        server.addHandler(
-            forMethod: "GET",
-            pathRegex: ".*/images/.*\\.(jpg|jpeg|png|gif|svg|webp)$",
-            request: ReadiumGCDWebServerRequest.self
-        ) { [weak self] request in
-            self?.handleMissingImage(request: request)
-        }
-        
-        // Add handler for other common asset paths
-        server.addHandler(
-            forMethod: "GET",
-            pathRegex: ".*/assets/.*\\.(css|js|woff|woff2|ttf|otf)$",
-            request: ReadiumGCDWebServerRequest.self
-        ) { [weak self] request in
-            self?.handleMissingAsset(request: request)
-        }
+        // Fallback handlers are disabled to prevent interference with publication resource serving
+        // The main handler will properly serve publication resources including images
+        // If resources are truly missing, they will be handled by the main handler's failure logic
     }
     
     private func handleMissingImage(request: ReadiumGCDWebServerRequest) -> ReadiumGCDWebServerResponse? {
         let path = request.url.path
+        let absoluteURLString = request.url.absoluteString
         log(.warning, "Missing image requested: \(path)")
+        log(.debug, "Full image URL: \(absoluteURLString)")
         
         // Return a 1x1 transparent PNG for missing images
         let transparentPNG = Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChAGGQGKsBQAAAABJRU5ErkJggg==")!
@@ -232,6 +220,8 @@ public class GCDHTTPServer: HTTPServer, Loggable {
             }
 
             log(.warning, "Resource not found for request \(request)")
+            log(.debug, "Request URL: \(url)")
+            log(.debug, "Available handlers: \(handlers.keys.map { $0.string })")
             completion(
                 HTTPServerRequest(url: url, href: nil),
                 HTTPServerResponse(error: .errorResponse(HTTPResponse(

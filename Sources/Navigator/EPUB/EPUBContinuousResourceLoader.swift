@@ -24,6 +24,15 @@ final class EPUBContinuousResourceLoader: Loggable {
     init(viewModel: EPUBNavigatorViewModel, readingOrder: [Link]) {
         self.viewModel = viewModel
         self.readingOrder = readingOrder
+        
+        // Log available publication resources for debugging
+        log(.debug, "Publication resources available:")
+        for resource in viewModel.publication.resources {
+            log(.debug, "  - \(resource.href) (\(resource.mediaType?.string ?? "unknown type"))")
+        }
+        for readingOrderLink in viewModel.publication.readingOrder {
+            log(.debug, "  - Reading order: \(readingOrderLink.href) (\(readingOrderLink.mediaType?.string ?? "unknown type"))")
+        }
     }
     
     // MARK: - Public Methods
@@ -79,6 +88,7 @@ final class EPUBContinuousResourceLoader: Loggable {
         return resourceCache[href]
     }
     
+    
     /// Clear all cached resources
     func clearCache() {
         resourceCache.removeAll()
@@ -99,7 +109,7 @@ final class EPUBContinuousResourceLoader: Loggable {
             throw EPUBContinuousResourceLoaderError.invalidEncoding(link.href)
         }
         
-        // Process the HTML content
+        // Process the HTML content without URL fixing
         let processedContent = processHTMLContent(rawHTML, link: link, index: index)
         
         let processedResource = ProcessedResource(
@@ -124,7 +134,7 @@ final class EPUBContinuousResourceLoader: Loggable {
         // Remove document structure (DOCTYPE, html, head, body tags)
         content = removeDocumentStructure(content)
         
-        // Fix relative URLs
+        // Fix relative URLs to include publication UUID prefix
         content = fixRelativeURLs(in: content, relativeTo: link)
         
         // Estimate content height (rough approximation)
@@ -197,7 +207,7 @@ final class EPUBContinuousResourceLoader: Loggable {
         
         var content = html
         
-        // Fix image src attributes
+        // Fix image src attributes  
         content = fixURLsWithPattern(
             content,
             pattern: #"src\s*=\s*["\']([^"\']+)["\']"#,
@@ -248,24 +258,20 @@ final class EPUBContinuousResourceLoader: Loggable {
             return relativePath
         }
         
-        // Absolute path from publication root
-        if relativePath.hasPrefix("/") {
-            return "\(publicationBaseURL)\(relativePath)"
-        }
-        
-        // Relative path from current resource
+        // Use proper URL resolution to get the correct path with UUID
         if let baseURLObject = URL(string: baseURL),
            let resolvedURL = URL(string: relativePath, relativeTo: baseURLObject) {
-            return resolvedURL.absoluteString
+            let result = resolvedURL.absoluteString
+            log(.debug, "Generated URL for \(relativePath): \(result)")
+            return result
         }
         
-        // Fallback
-        if let lastSlash = baseURL.lastIndex(of: "/") {
-            let directoryURL = String(baseURL[...lastSlash])
-            return "\(directoryURL)\(relativePath)"
-        }
-        
-        return "\(baseURL)/\(relativePath)"
+        // Fallback: ensure UUID is included for proper HTTP server routing
+        let cleanPublicationBaseURL = publicationBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let cleanRelativePath = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let fallbackResult = "\(cleanPublicationBaseURL)/\(cleanRelativePath)"
+        log(.debug, "Fallback URL for \(relativePath): \(fallbackResult)")
+        return fallbackResult
     }
     
     private func estimateContentHeight(_ html: String) -> CGFloat {
