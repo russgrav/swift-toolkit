@@ -12,7 +12,7 @@ import WebKit
 
 /// A view that provides continuous scrolling across multiple EPUB resources
 /// by concatenating them into a single scrollable WebView.
-final class EPUBContinuousScrollView: UIView, Loggable {
+final class EPUBContinuousScrollView: UIView, WKUIDelegate, Loggable {
     
     // MARK: - Properties
     
@@ -20,6 +20,7 @@ final class EPUBContinuousScrollView: UIView, Loggable {
     private let viewModel: EPUBNavigatorViewModel
     private let readingOrder: [Link]
     private let webView: WebView
+    private let resourceLoader: EPUBContinuousResourceLoader
     
     /// Current scroll position as a percentage of total content
     private(set) var scrollProgression: Double = 0.0
@@ -41,6 +42,7 @@ final class EPUBContinuousScrollView: UIView, Loggable {
     
     // FIX 3: Add state management to prevent reload loops
     private var isLoadingResources = false
+    private let loadingQueue = DispatchQueue(label: "continuous.loading", qos: .userInitiated)
     private var pendingScrollPosition: CGFloat?
     
     // MARK: - Initialization
@@ -54,6 +56,10 @@ final class EPUBContinuousScrollView: UIView, Loggable {
         self.readingOrder = readingOrder
         self.preloadCount = preloadCount
         self.webView = WebView(editingActions: viewModel.editingActions)
+        self.resourceLoader = EPUBContinuousResourceLoader(
+            viewModel: viewModel,
+            readingOrder: readingOrder
+        )
         
         super.init(frame: .zero)
         
@@ -111,12 +117,39 @@ final class EPUBContinuousScrollView: UIView, Loggable {
             return
         }
         
-        let safeIndex = max(0, min(resourceIndex, readingOrder.count - 1))
-        await loadResourcesAround(index: safeIndex)
+        log(.debug, "🚀 LOAD CONTENT: Requested to start at index \(resourceIndex)")
+        
+        // Always start loading from the beginning to maintain proper order
+        await loadResourcesFromBeginning()
         isContentLoaded = true
         
         await MainActor.run {
             delegate?.continuousScrollViewDidLoad(self)
+        }
+        
+        // If we need to scroll to a specific position, do it after loading
+        if resourceIndex > 0 {
+            log(.debug, "📍 LOAD CONTENT: Scrolling to resource \(resourceIndex)")
+            await scrollToResource(at: resourceIndex)
+        }
+    }
+    
+    /// Scroll to a specific resource by index
+    private func scrollToResource(at index: Int) async {
+        guard index < readingOrder.count else {
+            log(.warning, "Cannot scroll to resource \(index): index out of bounds")
+            return
+        }
+        
+        // Ensure the resource is loaded
+        await ensureResourceLoaded(at: index)
+        
+        // Find the boundary for this resource and scroll to it
+        if let boundary = resourceBoundaries.first(where: { $0.resourceIndex == index }) {
+            await MainActor.run {
+                let contentOffset = CGPoint(x: 0, y: boundary.startY)
+                webView.scrollView.setContentOffset(contentOffset, animated: false)
+            }
         }
     }
     
@@ -232,45 +265,53 @@ final class EPUBContinuousScrollView: UIView, Loggable {
     
     // MARK: - Private Methods
     
-    private func loadResourcesAround(index targetIndex: Int) async {
-        let startIndex = max(0, targetIndex - preloadCount)
-        let endIndex = min(readingOrder.count, targetIndex + preloadCount + 1)
+    private func loadResourcesFromBeginning() async {
+        let totalResources = readingOrder.count
         
-        loadedResourceRange = startIndex..<endIndex
+        // Load ALL resources at once to prevent any out-of-order loading
+        loadedResourceRange = 0..<totalResources
         loadedResources = []
         resourceBoundaries = []
         
         var htmlContent = createContinuousHTML()
         var currentHeight: CGFloat = 0
         
-        for i in startIndex..<endIndex {
-            let link = readingOrder[i]
+        log(.debug, "🔄 LOADING ALL RESOURCES FROM BEGINNING: 0 to \(totalResources - 1)")
+        
+        // Load ALL resources in the correct order from the beginning
+        do {
+            let resources = try await resourceLoader.loadResourcesSequentially(in: 0..<totalResources)
             
-            do {
-                let resourceContent = try await loadResourceContent(link: link)
+            log(.debug, "✅ LOADED \(resources.count) resources in sequence")
+            
+            for resource in resources {
                 let loadedResource = LoadedResource(
-                    index: i,
-                    link: link,
-                    content: resourceContent,
+                    index: resource.index,
+                    link: resource.link,
+                    content: resource.cleanedHTML,
                     startHeight: currentHeight
                 )
                 
                 loadedResources.append(loadedResource)
                 htmlContent += createResourceHTML(for: loadedResource)
                 
-                // We'll calculate actual heights after loading
+                // Use estimated height from resource
+                let estimatedHeight = resource.estimatedHeight
+                
                 let boundary = ResourceBoundary(
-                    resourceIndex: i,
+                    resourceIndex: resource.index,
                     startY: currentHeight,
-                    endY: currentHeight + 1000 // Temporary, will be updated
+                    endY: currentHeight + estimatedHeight
                 )
                 resourceBoundaries.append(boundary)
                 
-                currentHeight += 1000 // Temporary spacing
+                currentHeight += estimatedHeight
                 
-            } catch {
-                log(.error, "Failed to load resource \(link.href): \(error)")
+                log(.debug, "📄 ADDED RESOURCE IN ORDER: \(resource.index) - \(resource.title)")
             }
+            
+        } catch {
+            log(.error, "❌ Failed to load resources from beginning: \(error)")
         }
         
         htmlContent += "</body></html>"
@@ -280,13 +321,8 @@ final class EPUBContinuousScrollView: UIView, Loggable {
         }
     }
     
-    // FIX 4: Use asynchronous loading via resource loader
-    private func loadResourceContent(link: Link) async throws -> String {
-        // This should use the EPUBContinuousResourceLoader instead of direct file access
-        let url = viewModel.url(to: link)
-        let (data, _) = try await URLSession.shared.data(from: url.url)
-        return String(data: data, encoding: .utf8) ?? ""
-    }
+    // REMOVED: loadResourcesAround method - replaced with sequential loading from beginning
+    
     
     private func createContinuousHTML() -> String {
         return """
@@ -439,10 +475,23 @@ final class EPUBContinuousScrollView: UIView, Loggable {
     }
     
     private func ensureResourceLoaded(at index: Int) async {
-        guard !loadedResourceRange.contains(index) else { return }
+        guard !loadedResourceRange.contains(index) else { 
+            log(.debug, "✅ ENSURE RESOURCE: Resource \(index) already loaded in range \(loadedResourceRange)")
+            return 
+        }
         
-        // Resource is not loaded, need to load resources around this index
-        await loadResourcesAround(index: index)
+        log(.debug, "🔄 ENSURE RESOURCE: Need to load resource \(index), current range: \(loadedResourceRange)")
+        
+        // Instead of loading around the index, extend the range properly
+        if index < loadedResourceRange.lowerBound {
+            // Need to load previous resources
+            log(.debug, "⬆️ ENSURE RESOURCE: Loading previous resources to include \(index)")
+            await loadAdditionalResourcesAtBeginning()
+        } else if index >= loadedResourceRange.upperBound {
+            // Need to load next resources
+            log(.debug, "⬇️ ENSURE RESOURCE: Loading next resources to include \(index)")
+            await loadAdditionalResourcesAtEnd()
+        }
     }
     
     private func calculateScrollPosition(for locator: Locator) -> CGFloat? {
@@ -515,38 +564,57 @@ final class EPUBContinuousScrollView: UIView, Loggable {
     
     // FIX 3: Incremental loading methods to prevent scroll jumping
     private func loadPreviousResources() {
-        guard !isLoadingResources else { return }
-        isLoadingResources = true
-        
-        Task {
-            defer { isLoadingResources = false }
+        log(.debug, "🔄 LOAD PREVIOUS: Called for range \(loadedResourceRange)")
+        loadingQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard !self.isLoadingResources else { 
+                self.log(.debug, "🚫 LOAD PREVIOUS: Already loading, skipping")
+                return 
+            }
+            self.isLoadingResources = true
             
-            // Store current scroll position relative to content
-            let scrollView = webView.scrollView
-            let currentOffset = scrollView.contentOffset.y
-            let currentContentHeight = scrollView.contentSize.height
-            
-            // Load previous resources without rebuilding entire view
-            await loadAdditionalResourcesAtBeginning()
-            
-            // Restore scroll position relative to new content
-            let newContentHeight = scrollView.contentSize.height
-            let heightDifference = newContentHeight - currentContentHeight
-            let newOffset = currentOffset + heightDifference
-            
-            await MainActor.run {
-                scrollView.setContentOffset(CGPoint(x: 0, y: newOffset), animated: false)
+            Task { @MainActor in
+                defer { self.isLoadingResources = false }
+                
+                // Store current scroll position relative to content
+                let scrollView = self.webView.scrollView
+                let currentOffset = scrollView.contentOffset.y
+                let currentContentHeight = scrollView.contentSize.height
+                
+                self.log(.debug, "📍 LOAD PREVIOUS: Current offset: \(currentOffset), height: \(currentContentHeight)")
+                
+                // Load previous resources without rebuilding entire view
+                await self.loadAdditionalResourcesAtBeginning()
+                
+                // Restore scroll position relative to new content
+                let newContentHeight = scrollView.contentSize.height
+                let heightDifference = newContentHeight - currentContentHeight
+                let newOffset = currentOffset + heightDifference
+                
+                self.log(.debug, "📍 LOAD PREVIOUS: New height: \(newContentHeight), offset: \(newOffset)")
+                
+                await MainActor.run {
+                    scrollView.setContentOffset(CGPoint(x: 0, y: newOffset), animated: false)
+                }
             }
         }
     }
     
     private func loadNextResources() {
-        guard !isLoadingResources else { return }
-        isLoadingResources = true
-        
-        Task {
-            defer { isLoadingResources = false }
-            await loadAdditionalResourcesAtEnd()
+        log(.debug, "🔄 LOAD NEXT: Called for range \(loadedResourceRange)")
+        loadingQueue.async { [weak self] in
+            guard let self = self else { return }
+            guard !self.isLoadingResources else { 
+                self.log(.debug, "🚫 LOAD NEXT: Already loading, skipping")
+                return 
+            }
+            self.isLoadingResources = true
+            
+            Task { @MainActor in
+                defer { self.isLoadingResources = false }
+                self.log(.debug, "📍 LOAD NEXT: Loading additional resources at end")
+                await self.loadAdditionalResourcesAtEnd()
+            }
         }
     }
     
@@ -554,27 +622,41 @@ final class EPUBContinuousScrollView: UIView, Loggable {
         let currentStart = loadedResourceRange.lowerBound
         let newStart = max(0, currentStart - preloadCount)
         
-        guard newStart < currentStart else { return }
+        log(.debug, "📍 LOAD ADDITIONAL BEGINNING: currentStart=\(currentStart), newStart=\(newStart)")
+        
+        guard newStart < currentStart else { 
+            log(.debug, "🚫 LOAD ADDITIONAL BEGINNING: No resources to load")
+            return 
+        }
         
         var additionalHTML = ""
         
-        for i in newStart..<currentStart {
-            let link = readingOrder[i]
+        do {
+            let resources = try await resourceLoader.loadResourcesSequentially(in: newStart..<currentStart)
             
-            do {
-                let resourceContent = try await loadResourceContent(link: link)
+            log(.debug, "📦 LOAD ADDITIONAL BEGINNING: Got \(resources.count) resources for range \(newStart..<currentStart)")
+            
+            var newLoadedResources: [LoadedResource] = []
+            
+            for resource in resources {
                 let loadedResource = LoadedResource(
-                    index: i,
-                    link: link,
-                    content: resourceContent,
-                    startHeight: 0 // Will be calculated
+                    index: resource.index,
+                    link: resource.link,
+                    content: resource.cleanedHTML,
+                    startHeight: 0 // Will be calculated when prepended
                 )
                 
+                newLoadedResources.append(loadedResource)
                 additionalHTML += createResourceHTML(for: loadedResource)
                 
-            } catch {
-                log(.error, "Failed to load resource \(link.href): \(error)")
+                log(.debug, "⬆️ PREPENDING resource \(resource.index): \(resource.title)")
             }
+            
+            // Insert all resources at the beginning in the correct order
+            loadedResources.insert(contentsOf: newLoadedResources, at: 0)
+            
+        } catch {
+            log(.error, "❌ Failed to load additional resources at beginning: \(error)")
         }
         
         // Prepend to existing content
@@ -613,23 +695,25 @@ final class EPUBContinuousScrollView: UIView, Loggable {
         
         var additionalHTML = ""
         
-        for i in currentEnd..<newEnd {
-            let link = readingOrder[i]
+        do {
+            let resources = try await resourceLoader.loadResourcesSequentially(in: currentEnd..<newEnd)
             
-            do {
-                let resourceContent = try await loadResourceContent(link: link)
+            for resource in resources {
                 let loadedResource = LoadedResource(
-                    index: i,
-                    link: link,
-                    content: resourceContent,
-                    startHeight: 0
+                    index: resource.index,
+                    link: resource.link,
+                    content: resource.cleanedHTML,
+                    startHeight: 0 // Will be calculated when appended
                 )
                 
+                loadedResources.append(loadedResource)
                 additionalHTML += createResourceHTML(for: loadedResource)
                 
-            } catch {
-                log(.error, "Failed to load resource \(link.href): \(error)")
+                log(.debug, "Appended resource \(resource.index): \(resource.title)")
             }
+            
+        } catch {
+            log(.error, "Failed to load additional resources at end: \(error)")
         }
         
         // Append to existing content
@@ -689,21 +773,28 @@ extension EPUBContinuousScrollView: UIScrollViewDelegate {
             delegate?.continuousScrollView(self, didScrollTo: locator)
         }
         
-        // Check if we need to load more resources (but don't reload existing ones)
-        // Only load new resources if we're actually near boundaries and not already loading
-        guard !isLoadingResources else { return }
+        // DISABLED: Dynamic loading to prevent out-of-order issues
+        // Since we now load all resources at once, no need for dynamic loading
+        /*
+        guard !isLoadingResources else { 
+            log(.debug, "🚫 SCROLL: Already loading resources, skipping")
+            return 
+        }
         
         let contentHeight = scrollView.contentSize.height
         let viewportHeight = scrollView.frame.height
         
         if currentOffset < viewportHeight && loadedResourceRange.lowerBound > 0 {
             // Near top, load previous resources
+            log(.debug, "⬆️ SCROLL: Near top, would load previous resources (range: \(loadedResourceRange))")
             loadPreviousResources()
         } else if currentOffset > contentHeight - viewportHeight * 2 && 
                   loadedResourceRange.upperBound < readingOrder.count {
             // Near bottom, load next resources
+            log(.debug, "⬇️ SCROLL: Near bottom, would load next resources (range: \(loadedResourceRange))")
             loadNextResources()
         }
+        */
     }
     
     func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
@@ -757,16 +848,55 @@ extension EPUBContinuousScrollView: WKNavigationDelegate {
         
         do {
             let result = try await webView.evaluateJavaScript(script)
-            if let boundariesData = result as? [[String: Any]] {
-                await MainActor.run {
-                    self.resourceBoundaries = boundariesData.compactMap { data in
-                        guard let index = data["index"] as? Int,
-                              let startY = data["startY"] as? CGFloat,
-                              let endY = data["endY"] as? CGFloat else {
-                            return nil
-                        }
-                        return ResourceBoundary(resourceIndex: index, startY: startY, endY: endY)
+            
+            // Validate the result type before processing
+            guard let boundariesData = result as? [[String: Any]] else {
+                log(.warning, "Expected array of dictionaries but got: \(type(of: result))")
+                return
+            }
+            await MainActor.run {
+                self.resourceBoundaries = boundariesData.compactMap { data in
+                    // Safe extraction with NSNumber handling
+                    guard let indexValue = data["index"],
+                          let startYValue = data["startY"],
+                          let endYValue = data["endY"] else {
+                        return nil
                     }
+                    
+                    // Convert NSNumber to native Swift types safely
+                    let index: Int
+                    let startY: CGFloat
+                    let endY: CGFloat
+                    
+                    if let indexNumber = indexValue as? NSNumber {
+                        index = indexNumber.intValue
+                    } else if let indexInt = indexValue as? Int {
+                        index = indexInt
+                    } else {
+                        return nil
+                    }
+                    
+                    if let startYNumber = startYValue as? NSNumber {
+                        startY = CGFloat(startYNumber.doubleValue)
+                    } else if let startYDouble = startYValue as? Double {
+                        startY = CGFloat(startYDouble)
+                    } else if let startYFloat = startYValue as? CGFloat {
+                        startY = startYFloat
+                    } else {
+                        return nil
+                    }
+                    
+                    if let endYNumber = endYValue as? NSNumber {
+                        endY = CGFloat(endYNumber.doubleValue)
+                    } else if let endYDouble = endYValue as? Double {
+                        endY = CGFloat(endYDouble)
+                    } else if let endYFloat = endYValue as? CGFloat {
+                        endY = endYFloat
+                    } else {
+                        return nil
+                    }
+                    
+                    return ResourceBoundary(resourceIndex: index, startY: startY, endY: endY)
                 }
             }
         } catch {
@@ -775,9 +905,6 @@ extension EPUBContinuousScrollView: WKNavigationDelegate {
     }
 }
 
-extension EPUBContinuousScrollView: WKUIDelegate {
-    // Handle any UI delegate methods as needed
-}
 
 // MARK: - Delegate Protocol
 
@@ -793,4 +920,20 @@ protocol EPUBContinuousScrollViewDelegate: AnyObject {
     
     /// Called when an error occurs
     func continuousScrollView(_ scrollView: EPUBContinuousScrollView, didEncounterError error: Error)
+}
+
+// MARK: - Error Types
+
+enum EPUBContinuousScrollViewError: Error {
+    case resourceNotFound(String)
+    case loadingFailed(Error)
+    
+    var localizedDescription: String {
+        switch self {
+        case .resourceNotFound(let href):
+            return "Resource not found: \(href)"
+        case .loadingFailed(let error):
+            return "Loading failed: \(error.localizedDescription)"
+        }
+    }
 }

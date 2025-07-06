@@ -251,8 +251,6 @@ open class EPUBNavigatorViewController: UIViewController,
     /// Resource loader for continuous scroll mode
     private var resourceLoader: EPUBContinuousResourceLoader?
     
-    /// HTML builder for continuous scroll mode
-    private var htmlBuilder: EPUBContinuousHTMLBuilder?
     
     /// Current navigation mode
     private enum NavigationMode {
@@ -376,10 +374,6 @@ open class EPUBNavigatorViewController: UIViewController,
             viewModel: viewModelOverride,
             readingOrder: readingOrder
         )
-        htmlBuilder = EPUBContinuousHTMLBuilder(
-            viewModel: viewModelOverride,
-            readingOrder: readingOrder
-        )
         
         // Setup the appropriate navigation mode
         await setupNavigationMode()
@@ -446,8 +440,7 @@ open class EPUBNavigatorViewController: UIViewController,
             .flatMap { locator in readingOrder.firstIndex { $0.href == locator.href.string } }
             ?? 0
         
-        // FIX: Preload resources using the resource loader before setting up the scroll view
-        await resourceLoader.preloadResources(around: startIndex, preloadCount: config.preloadPreviousPositionCount)
+        // The continuous scroll view will handle loading resources sequentially
         
         await continuousScrollView!.loadContent(startingAt: startIndex)
         
