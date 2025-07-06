@@ -12,7 +12,7 @@ import WebKit
 
 /// A view that provides continuous scrolling across multiple EPUB resources
 /// by concatenating them into a single scrollable WebView.
-final class EPUBContinuousScrollView: UIView, WKUIDelegate, Loggable {
+final class EPUBContinuousScrollView: UIView, WKUIDelegate, UIGestureRecognizerDelegate, Loggable {
     
     // MARK: - Properties
     
@@ -95,6 +95,11 @@ final class EPUBContinuousScrollView: UIView, WKUIDelegate, Loggable {
         webView.scrollView.showsHorizontalScrollIndicator = false
         webView.scrollView.showsVerticalScrollIndicator = true
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        
+        // Add tap gesture recognizer for bringing up controls
+        let tapGestureRecognizer = UITapGestureRecognizer(target: self, action: #selector(didTapBackground))
+        tapGestureRecognizer.delegate = self
+        addGestureRecognizer(tapGestureRecognizer)
         
         addSubview(webView)
     }
@@ -547,6 +552,12 @@ final class EPUBContinuousScrollView: UIView, WKUIDelegate, Loggable {
         applySettings()
     }
     
+    /// Called by the UITapGestureRecognizer as a fallback tap when tapping around the webview.
+    @objc private func didTapBackground(_ gesture: UITapGestureRecognizer) {
+        let point = gesture.location(in: self)
+        delegate?.continuousScrollView(self, didTapAt: point)
+    }
+    
     // FIX 3: Incremental loading methods to prevent scroll jumping
     private func loadPreviousResources() {
         loadingQueue.async { [weak self] in
@@ -840,6 +851,14 @@ extension EPUBContinuousScrollView: WKNavigationDelegate {
     }
 }
 
+// MARK: - Gesture Recognizer Delegate
+
+extension EPUBContinuousScrollView {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {
+        // Allow tap gesture to work alongside scroll view gestures
+        return true
+    }
+}
 
 // MARK: - Delegate Protocol
 
