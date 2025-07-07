@@ -340,7 +340,6 @@ final class EPUBContinuousScrollView: UIView, WKUIDelegate, UIGestureRecognizerD
                 .resource-container {
                     margin: 20px;
                     padding: 20px;
-                    border-bottom: 1px solid #e0e0e0;
                     page-break-inside: avoid;
                 }
                 .resource-container:last-child {
@@ -423,7 +422,6 @@ final class EPUBContinuousScrollView: UIView, WKUIDelegate, UIGestureRecognizerD
         
         return """
         <div class="resource-container" data-resource-index="\(resource.index)" data-resource-href="\(resource.link.href)">
-            <div class="resource-header">\(escapeHTML(title))</div>
             <div class="resource-content">
                 \(cleanContent)
             </div>
