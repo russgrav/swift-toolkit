@@ -333,7 +333,18 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
     /// Scrolls at given progression (from 0.0 to 1.0)
     @discardableResult
     private func scroll(toProgression progression: Double) async -> Bool {
-        print("🐾 [TempPos] scroll(toProgression: \(progression)) called for href: \(spread.leading.url().string)")
+        let href = spread.leading.url().string
+        print("🐾 [TempPos] scroll(toProgression: \(progression)) called for href: \(href)")
+        
+        // IMPORTANT: Only apply scroll positioning if this is the current visible page
+        // Preloaded pages should not execute scroll positioning scripts
+        guard let parentView = superview as? UIScrollView,
+              let paginationView = parentView.superview as? PaginationView,
+              let currentView = paginationView.currentView,
+              currentView === self else {
+            print("🐾 [TempPos] Skipping scroll positioning for non-current page: \(href)")
+            return true // Return true but don't execute positioning
+        }
         
         guard progression >= 0, progression <= 1 else {
             log(.warning, "Scrolling to invalid progression \(progression)")
