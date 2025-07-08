@@ -333,6 +333,8 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
     /// Scrolls at given progression (from 0.0 to 1.0)
     @discardableResult
     private func scroll(toProgression progression: Double) async -> Bool {
+        print("🐾 [TempPos] scroll(toProgression: \(progression)) called for href: \(spread.leading.url().string)")
+        
         guard progression >= 0, progression <= 1 else {
             log(.warning, "Scrolling to invalid progression \(progression)")
             return false

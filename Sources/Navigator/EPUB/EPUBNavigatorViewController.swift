@@ -240,6 +240,20 @@ open class EPUBNavigatorViewController: UIViewController,
     private var positionsByReadingOrder: [[Locator]] = []
     private let tasks = CancellableTasks()
 
+    // MARK: - Temporary Position Storage for Back Navigation
+    
+    /// Stores temporary positions for recently visited resources to preserve scroll position during back navigation
+    private var temporaryPositions: [String: (locator: Locator, timestamp: Date)] = [:]
+    
+    /// Tracks navigation history to detect back navigation patterns
+    private var navigationHistory: [String] = []
+    
+    /// Maximum number of entries to keep in navigation history
+    private let maxHistorySize = 10
+    
+    /// How long to keep temporary positions (30 seconds)
+    private let temporaryPositionLifetime: TimeInterval = 30.0
+
     private let viewModel: EPUBNavigatorViewModel
     public var publication: Publication { viewModel.publication }
     
@@ -335,6 +349,9 @@ open class EPUBNavigatorViewController: UIViewController,
         // This ensures all Japanese EPUBs will use consistent LTR pagination regardless of metadata
         viewModelOverride.overrideReadingProgression(with: .ltr)
         
+        // Clear temporary positions on fresh app launch
+        clearTemporaryPositions()
+        
         // Will call `accessibilityScroll()` when VoiceOver reaches the end of
         // the current resource. We can use this to go to the next resource.
         view.accessibilityTraits.insert(.causesPageTurn)
@@ -419,6 +436,19 @@ open class EPUBNavigatorViewController: UIViewController,
         becomeFirstResponder()
     }
 
+    override open func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        
+        // Clear temporary positions when the view is about to disappear
+        // This ensures we don't carry temporary state between different book sessions
+        clearTemporaryPositions()
+    }
+
+    deinit {
+        // Clear temporary positions when the navigator is deallocated
+        clearTemporaryPositions()
+    }
+
     override open var canBecomeFirstResponder: Bool { true }
 
     override open func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
@@ -490,6 +520,65 @@ open class EPUBNavigatorViewController: UIViewController,
         return fulfill(linkList: toc)
     }
 
+    // MARK: - Temporary Position Management
+
+    /// Stores a temporary position for a resource to preserve scroll position during session navigation
+    private func storeTemporaryPosition(for href: String, locator: Locator) {
+        temporaryPositions[href] = (locator: locator, timestamp: Date())
+        print("🐾 [TempPos] Stored temporary position for \(href) at progression \(locator.locations.progression ?? 0.0)")
+    }
+
+    /// Retrieves a temporary position for a resource if it exists and hasn't expired
+    private func getTemporaryPosition(for href: String) -> Locator? {
+        guard let stored = temporaryPositions[href] else { 
+            print("🐾 [TempPos] No temporary position found for \(href)")
+            return nil 
+        }
+        
+        // Check if position is still valid (within lifetime)
+        if Date().timeIntervalSince(stored.timestamp) > temporaryPositionLifetime {
+            temporaryPositions.removeValue(forKey: href)
+            print("🐾 [TempPos] Temporary position for \(href) expired")
+            return nil
+        }
+        
+        print("🐾 [TempPos] Retrieved temporary position for \(href) at progression \(stored.locator.locations.progression ?? 0.0)")
+        return stored.locator
+    }
+
+    /// Checks if navigation to the given href represents back navigation to a recently visited resource
+    private func isBackNavigation(to href: String) -> Bool {
+        // Check if this resource was visited recently (within last few steps)
+        // We exclude the last entry (current resource) to avoid false positives
+        let result = navigationHistory.dropLast().contains(href)
+        print("🐾 [TempPos] Checking back navigation to \(href): \(result ? "YES" : "NO") (history: \(navigationHistory))")
+        return result
+    }
+
+    /// Updates the navigation history with a new href
+    private func updateNavigationHistory(_ href: String) {
+        // Add to history and maintain size limit
+        navigationHistory.append(href)
+        if navigationHistory.count > maxHistorySize {
+            navigationHistory.removeFirst()
+        }
+        print("🐾 [TempPos] Updated navigation history: \(navigationHistory)")
+    }
+
+    /// Clears all temporary positions and navigation history
+    private func clearTemporaryPositions() {
+        temporaryPositions.removeAll()
+        navigationHistory.removeAll()
+    }
+
+    /// Removes expired temporary positions to prevent memory buildup
+    private func cleanupExpiredTemporaryPositions() {
+        let now = Date()
+        temporaryPositions = temporaryPositions.filter { _, value in
+            now.timeIntervalSince(value.timestamp) <= temporaryPositionLifetime
+        }
+    }
+
     /// Goes to the next or previous page in the given scroll direction.
     private func go(to direction: EPUBSpreadView.Direction, options: NavigatorGoOptions) async -> Bool {
         guard
@@ -510,20 +599,59 @@ open class EPUBNavigatorViewController: UIViewController,
             }
             
             // If we couldn't navigate within the spread, then move to next/previous spread
+            // Store current position before navigating away
+            let currentHref = spreadView.spread.leading.url().string
+            if let currentLocator = await computeCurrentLocation() {
+                storeTemporaryPosition(for: currentHref, locator: currentLocator)
+            }
+            
+            // Clean up expired positions periodically
+            cleanupExpiredTemporaryPositions()
+            
             // Always use fixed delta of 1 regardless of reading progression
             let delta = 1
+            let targetIndex = currentSpreadIndex + (direction == .left ? -delta : delta)
+            
+            // Get the target resource href to check for back navigation
+            let targetHref: String? = spreads.indices.contains(targetIndex) ? spreads[targetIndex].leading.url().string : nil
+            
             let moved: Bool = await {
                 switch direction {
                 case .left:
                     // Left always means previous page in our forced LTR model
-                    let location: PageLocation = .end
-                    return await paginationView.goToIndex(currentSpreadIndex - delta, location: location, options: options)
+                    let location: PageLocation
+                    if let href = targetHref, isBackNavigation(to: href),
+                       let temporaryLocator = getTemporaryPosition(for: href) {
+                        // Use temporary position for back navigation
+                        location = .locator(temporaryLocator)
+                        print("🐾 [TempPos] LEFT: Using temporary locator with progression \(temporaryLocator.locations.progression ?? 0.0)")
+                    } else {
+                        // Use default end position
+                        location = .end
+                        print("🐾 [TempPos] LEFT: Using default end position (progression 1.0)")
+                    }
+                    return await paginationView.goToIndex(targetIndex, location: location, options: options)
                 case .right:
                     // Right always means next page in our forced LTR model
-                    let location: PageLocation = .start
-                    return await paginationView.goToIndex(currentSpreadIndex + delta, location: location, options: options)
+                    let location: PageLocation
+                    if let href = targetHref, isBackNavigation(to: href),
+                       let temporaryLocator = getTemporaryPosition(for: href) {
+                        // Use temporary position for back navigation
+                        location = .locator(temporaryLocator)
+                        print("🐾 [TempPos] RIGHT: Using temporary locator with progression \(temporaryLocator.locations.progression ?? 0.0)")
+                    } else {
+                        // Use default start position
+                        location = .start
+                        print("🐾 [TempPos] RIGHT: Using default start position (progression 0.0)")
+                    }
+                    return await paginationView.goToIndex(targetIndex, location: location, options: options)
                 }
             }()
+            
+            // Update navigation history after successful navigation
+            if moved, let href = targetHref {
+                updateNavigationHistory(href)
+            }
             
             on(.moved)
             return moved
@@ -531,16 +659,36 @@ open class EPUBNavigatorViewController: UIViewController,
         
         // Fallback to standard navigation if no spread view
         let delta = 1
+        let targetIndex = currentSpreadIndex + (direction == .left ? -delta : delta)
+        let targetHref: String? = spreads.indices.contains(targetIndex) ? spreads[targetIndex].leading.url().string : nil
+        
         let moved: Bool = await {
             switch direction {
             case .left:
-                let location: PageLocation = .end
-                return await paginationView.goToIndex(currentSpreadIndex - delta, location: location, options: options)
+                let location: PageLocation
+                if let href = targetHref, isBackNavigation(to: href),
+                   let temporaryLocator = getTemporaryPosition(for: href) {
+                    location = .locator(temporaryLocator)
+                } else {
+                    location = .end
+                }
+                return await paginationView.goToIndex(targetIndex, location: location, options: options)
             case .right:
-                let location: PageLocation = .start
-                return await paginationView.goToIndex(currentSpreadIndex + delta, location: location, options: options)
+                let location: PageLocation
+                if let href = targetHref, isBackNavigation(to: href),
+                   let temporaryLocator = getTemporaryPosition(for: href) {
+                    location = .locator(temporaryLocator)
+                } else {
+                    location = .start
+                }
+                return await paginationView.goToIndex(targetIndex, location: location, options: options)
             }
         }()
+        
+        // Update navigation history after successful navigation
+        if moved, let href = targetHref {
+            updateNavigationHistory(href)
+        }
         
         on(.moved)
         return moved
@@ -652,6 +800,13 @@ open class EPUBNavigatorViewController: UIViewController,
             pageCount: spreads.count,
             readingProgression: .ltr // Always force LTR reading progression regardless of original EPUB metadata
         )
+        
+        // Initialize navigation history with the starting resource
+        if spreads.indices.contains(initialIndex) {
+            let initialHref = spreads[initialIndex].leading.url().string
+            updateNavigationHistory(initialHref)
+        }
+        
         on(.loaded)
     }
 
@@ -751,6 +906,11 @@ open class EPUBNavigatorViewController: UIViewController,
             let location = currentLocation,
             location != notifiedCurrentLocation
         {
+            // Store temporary position for the previous location before updating to new one
+            if let previousLocation = notifiedCurrentLocation {
+                storeTemporaryPosition(for: previousLocation.href.string, locator: previousLocation)
+            }
+            
             notifiedCurrentLocation = location
             delegate.navigator(self, locationDidChange: location)
         }
@@ -1272,7 +1432,37 @@ extension EPUBNavigatorViewController: PaginationViewDelegate {
     func paginationViewDidUpdateViews(_ paginationView: PaginationView) {
         // notice that you should set the delegate before you load views
         // otherwise, when open the publication, you may miss the first invocation
+        
+        // Update navigation history when pagination views are updated
+        if let currentSpreadView = paginationView.currentView as? EPUBSpreadView {
+            let currentHref = currentSpreadView.spread.leading.url().string
+            print("🐾 [TempPos] Navigation completed to: \(currentHref)")
+            updateNavigationHistory(currentHref)
+        }
+        
         updateCurrentLocation()
+    }
+    
+    func paginationView(_ paginationView: PaginationView, pageLocationForIndex index: Int, movingBackward: Bool) -> PageLocation? {
+        // Get the target resource href
+        guard spreads.indices.contains(index) else { return nil }
+        
+        let targetHref = spreads[index].leading.url().string
+        print("🐾 [TempPos] Determining page location for index \(index), href: \(targetHref), movingBackward: \(movingBackward)")
+        
+        // Check if this is back navigation to a previously visited resource
+        if isBackNavigation(to: targetHref) {
+            if let temporaryLocator = getTemporaryPosition(for: targetHref) {
+                print("🐾 [TempPos] ✅ RETURNING TEMPORARY LOCATOR for \(targetHref) with progression \(temporaryLocator.locations.progression ?? 0.0)")
+                return .locator(temporaryLocator)
+            } else {
+                print("🐾 [TempPos] ❌ Back navigation detected but no temporary position found for \(targetHref)")
+            }
+        }
+        
+        // Return nil to use default behavior (.start for forward, .end for backward)
+        print("🐾 [TempPos] Using default page location for \(targetHref): \(movingBackward ? ".end" : ".start")")
+        return nil
     }
 
     func paginationView(_ paginationView: PaginationView, positionCountAtIndex index: Int) -> Int {

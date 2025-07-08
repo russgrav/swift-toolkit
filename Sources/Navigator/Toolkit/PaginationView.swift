@@ -43,6 +43,17 @@ protocol PaginationViewDelegate: AnyObject {
 
     /// Returns the number of positions (as in `Publication.positionList`) in the page view at given index.
     func paginationView(_ paginationView: PaginationView, positionCountAtIndex index: Int) -> Int
+    
+    /// Called when determining the page location during swipe navigation.
+    /// Return nil to use default behavior (.start for forward, .end for backward).
+    func paginationView(_ paginationView: PaginationView, pageLocationForIndex index: Int, movingBackward: Bool) -> PageLocation?
+}
+
+extension PaginationViewDelegate {
+    /// Default implementation that returns nil to maintain backward compatibility
+    func paginationView(_ paginationView: PaginationView, pageLocationForIndex index: Int, movingBackward: Bool) -> PageLocation? {
+        return nil
+    }
 }
 
 final class PaginationView: UIView, Loggable {
@@ -190,7 +201,17 @@ final class PaginationView: UIView, Loggable {
         // resource depending on the last index. This allows to navigate backward across resources,
         // starting from the end of each previous resource.
         let movingBackward = (currentIndex - 1 == index)
-        let location = location ?? (movingBackward ? .end : .start)
+        let location = location ?? {
+            // Try to get custom page location from delegate first
+            if let customLocation = delegate?.paginationView(self, pageLocationForIndex: index, movingBackward: movingBackward) {
+                print("🐾 [PaginationView] Using CUSTOM page location: \(customLocation)")
+                return customLocation
+            }
+            // Fall back to default behavior
+            let defaultLocation: PageLocation = movingBackward ? .end : .start
+            print("🐾 [PaginationView] Using DEFAULT page location: \(defaultLocation)")
+            return defaultLocation
+        }()
 
         currentIndex = index
 
