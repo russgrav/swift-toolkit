@@ -777,12 +777,19 @@ open class EPUBNavigatorViewController: UIViewController,
         }
 
         // Initialize our viewModel with LTR reading progression override
-        viewModelOverride.overrideReadingProgression(with: .ltr)
-        
+        // For vertical text in paginated mode, use RTL progression between chapters
+        // For horizontal text, use LTR progression
+        let isVerticalPaginated = viewModelOverride.settings.verticalText && !viewModelOverride.settings.scroll
+        let chapterProgression: ReadingProgression = isVerticalPaginated ? .rtl : .ltr
+
+        print("📘 [EPUBNavigator] Chapter progression: \(chapterProgression), verticalText: \(viewModelOverride.settings.verticalText), scroll: \(viewModelOverride.settings.scroll)")
+
+        viewModelOverride.overrideReadingProgression(with: chapterProgression)
+
         spreads = EPUBSpread.makeSpreads(
             for: publication,
             readingOrder: readingOrder,
-            readingProgression: .ltr, // Always force LTR reading progression
+            readingProgression: chapterProgression,
             spread: viewModelOverride.spreadEnabled
         )
 
@@ -798,7 +805,7 @@ open class EPUBNavigatorViewController: UIViewController,
             initialIndex,
             location: PageLocation(locator),
             pageCount: spreads.count,
-            readingProgression: .ltr // Always force LTR reading progression regardless of original EPUB metadata
+            readingProgression: chapterProgression
         )
         
         // Initialize navigation history with the starting resource

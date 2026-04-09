@@ -9,6 +9,16 @@
 import { TextQuoteAnchor } from "./vendor/hypothesis/anchoring/types";
 import { getCurrentSelection } from "./selection";
 
+// Override console.log to send to native code
+const originalConsoleLog = console.log;
+console.log = function(...args) {
+  const message = args.map(arg =>
+    typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+  ).join(' ');
+  webkit.messageHandlers.log.postMessage(message);
+  originalConsoleLog.apply(console, args);
+};
+
 window.addEventListener(
   "error",
   function (event) {
@@ -87,12 +97,31 @@ function onScroll() {
     return;
   }
 
-  last_known_scrollY_position =
-    window.scrollY / document.scrollingElement.scrollHeight;
-  // Using Math.abs because for RTL books, the value will be negative.
-  last_known_scrollX_position = Math.abs(
-    window.scrollX / document.scrollingElement.scrollWidth
-  );
+  const isVertical = isVerticalWritingMode();
+  const isScroll = isScrollModeEnabled();
+
+  if (isScroll) {
+    if (!isVertical) {
+      // Traditional vertical scroll mode for horizontal text
+      last_known_scrollY_position =
+        window.scrollY / document.scrollingElement.scrollHeight;
+      last_known_scrollX_position = 0;
+    } else {
+      // Horizontal scroll for vertical text in scroll mode
+      // Using Math.abs because for RTL, the value will be negative
+      last_known_scrollX_position = Math.abs(
+        window.scrollX / document.scrollingElement.scrollWidth
+      );
+      last_known_scrollY_position = 0;
+    }
+  } else {
+    // Paginated mode - ALWAYS horizontal for both LTR and RTL/vertical
+    // Using Math.abs because for RTL books, the value will be negative
+    last_known_scrollX_position = Math.abs(
+      window.scrollX / document.scrollingElement.scrollWidth
+    );
+    last_known_scrollY_position = 0;
+  }
 
   // Window is hidden
   if (
@@ -105,7 +134,7 @@ function onScroll() {
   if (!ticking) {
     window.requestAnimationFrame(function () {
       update(
-        isScrollModeEnabled()
+        isScroll && !isVertical
           ? last_known_scrollY_position
           : last_known_scrollX_position
       );
@@ -142,6 +171,29 @@ export function isScrollModeEnabled() {
   return style.getPropertyValue("--USER__view").trim() == "readium-scroll-on";
 }
 
+export function isVerticalWritingMode() {
+  // Check the CSS variable that indicates vertical text mode
+  // This is more reliable than checking computed writing-mode since we keep html in horizontal-tb
+  const userWritingMode = document.documentElement.style.getPropertyValue("--USER__writingMode").trim();
+  if (userWritingMode === "vertical-rl") {
+    return true;
+  }
+
+  // Fallback to checking computed writing-mode for scroll mode
+  const writingMode = window
+    .getComputedStyle(document.documentElement)
+    .getPropertyValue("writing-mode");
+  return writingMode.startsWith("vertical");
+}
+
+export function isRTL() {
+  const style = window.getComputedStyle(document.documentElement);
+  return (
+    style.getPropertyValue("direction") == "rtl" ||
+    style.getPropertyValue("writing-mode") == "vertical-rl"
+  );
+}
+
 // Scroll to the given TagId in document and snap.
 export function scrollToId(id) {
   let element = document.getElementById(id);
@@ -161,13 +213,25 @@ export function scrollToPosition(position, dir) {
     return;
   }
 
-  if (isScrollModeEnabled()) {
-    let offset = document.scrollingElement.scrollHeight * position;
-    document.scrollingElement.scrollTop = offset;
-    // window.scrollTo(0, offset);
+  const isVertical = isVerticalWritingMode();
+  const isScroll = isScrollModeEnabled();
+
+  if (isScroll) {
+    if (!isVertical) {
+      // Traditional vertical scroll for horizontal text
+      let offset = document.scrollingElement.scrollHeight * position;
+      document.scrollingElement.scrollTop = offset;
+    } else {
+      // Horizontal scroll for vertical text (RTL direction)
+      let offset = document.scrollingElement.scrollWidth * position;
+      // For RTL, scrollLeft is negative or counted from the right
+      document.scrollingElement.scrollLeft = -offset;
+    }
   } else {
+    // Paginated mode - ALWAYS horizontal for both LTR and RTL/vertical
     var documentWidth = document.scrollingElement.scrollWidth;
-    var factor = dir == "rtl" ? -1 : 1;
+    // For vertical text (RTL), direction is inverted
+    var factor = dir == "rtl" || isVertical ? -1 : 1;
     let offset = documentWidth * position * factor;
     document.scrollingElement.scrollLeft = snapOffset(offset);
   }
@@ -190,9 +254,19 @@ function scrollToRange(range) {
 }
 
 function scrollToRect(rect) {
-  if (isScrollModeEnabled()) {
-    document.scrollingElement.scrollTop = rect.top + window.scrollY;
+  const isVertical = isVerticalWritingMode();
+  const isScroll = isScrollModeEnabled();
+
+  if (isScroll) {
+    if (!isVertical) {
+      // Traditional vertical scroll for horizontal text
+      document.scrollingElement.scrollTop = rect.top + window.scrollY;
+    } else {
+      // Horizontal scroll for vertical text
+      document.scrollingElement.scrollLeft = rect.left + window.scrollX;
+    }
   } else {
+    // Paginated mode - ALWAYS horizontal for both LTR and RTL/vertical
     document.scrollingElement.scrollLeft = snapOffset(
       rect.left + window.scrollX
     );
@@ -203,22 +277,54 @@ function scrollToRect(rect) {
 
 // Returns false if the page is already at the left-most scroll offset.
 export function scrollLeft(dir) {
-  var isRTL = dir == "rtl";
-  var documentWidth = document.scrollingElement.scrollWidth;
-  var pageWidth = window.innerWidth;
-  var offset = window.scrollX - pageWidth;
-  var minOffset = isRTL ? -(documentWidth - pageWidth) : 0;
-  return scrollToOffset(Math.max(offset, minOffset));
+  const isVertical = isVerticalWritingMode();
+  const isScroll = isScrollModeEnabled();
+  var isRTL = dir == "rtl" || isVertical;
+
+  if (isScroll && isVertical) {
+    // Scroll mode with vertical text: scroll horizontally right (backward)
+    var documentWidth = document.scrollingElement.scrollWidth;
+    var pageWidth = window.innerWidth;
+    var offset = window.scrollX + pageWidth;
+    var maxOffset = 0; // RTL scrolling
+    return scrollToOffset(Math.min(offset, maxOffset));
+  } else if (isScroll && !isVertical) {
+    // Scroll mode with horizontal text: not used (vertical scroll instead)
+    return false;
+  } else {
+    // Paginated mode - ALWAYS horizontal scrolling
+    var documentWidth = document.scrollingElement.scrollWidth;
+    var pageWidth = window.innerWidth;
+    var offset = window.scrollX - pageWidth;
+    var minOffset = isRTL ? -(documentWidth - pageWidth) : 0;
+    return scrollToOffset(Math.max(offset, minOffset));
+  }
 }
 
 // Returns false if the page is already at the right-most scroll offset.
 export function scrollRight(dir) {
-  var isRTL = dir == "rtl";
-  var documentWidth = document.scrollingElement.scrollWidth;
-  var pageWidth = window.innerWidth;
-  var offset = window.scrollX + pageWidth;
-  var maxOffset = isRTL ? 0 : documentWidth - pageWidth;
-  return scrollToOffset(Math.min(offset, maxOffset));
+  const isVertical = isVerticalWritingMode();
+  const isScroll = isScrollModeEnabled();
+  var isRTL = dir == "rtl" || isVertical;
+
+  if (isScroll && isVertical) {
+    // Scroll mode with vertical text: scroll horizontally left (forward)
+    var documentWidth = document.scrollingElement.scrollWidth;
+    var pageWidth = window.innerWidth;
+    var offset = window.scrollX - pageWidth;
+    var minOffset = -(documentWidth - pageWidth); // RTL scrolling
+    return scrollToOffset(Math.max(offset, minOffset));
+  } else if (isScroll && !isVertical) {
+    // Scroll mode with horizontal text: not used (vertical scroll instead)
+    return false;
+  } else {
+    // Paginated mode - ALWAYS horizontal scrolling
+    var documentWidth = document.scrollingElement.scrollWidth;
+    var pageWidth = window.innerWidth;
+    var offset = window.scrollX + pageWidth;
+    var maxOffset = isRTL ? 0 : documentWidth - pageWidth;
+    return scrollToOffset(Math.min(offset, maxOffset));
+  }
 }
 
 // Scrolls to the given left offset.
@@ -306,6 +412,7 @@ export function setCSSProperties(properties) {
   for (const name in properties) {
     setProperty(name, properties[name]);
   }
+  // Writing mode is handled by inline CSS injection, not here
 }
 
 // For setting user setting.

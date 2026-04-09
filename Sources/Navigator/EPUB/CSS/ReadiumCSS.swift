@@ -70,6 +70,7 @@ extension ReadiumCSS {
                 "font-weight": settings.fontWeight
                     .map { String(format: "%.0f", (Double(CSSStandardFontWeight.normal.rawValue) * $0).clamped(to: 1 ... 1000)) }
                     ?? "",
+                "--USER__writingMode": settings.verticalText ? "vertical-rl" : "horizontal-tb",
             ]
         )
     }
@@ -98,12 +99,22 @@ extension ReadiumCSS: HTMLInjectable {
     func injections(for html: String) throws -> [HTMLInjection] {
         let document = try parse(html)
 
+        // Check if we're in paginated vertical text mode
+        let isPaginated = userProperties.view == .paged
+        let isVerticalText = userProperties.overrides["--USER__writingMode"] as? String == "vertical-rl"
+        let isPaginatedVerticalText = isPaginated && isVerticalText
+
         var inj: [HTMLInjection] = []
         inj.append(.meta(name: "viewport", content: "width=device-width, height=device-height, initial-scale=1.0"))
         inj.append(contentsOf: styleInjections(for: html))
         inj.append(cssPropertiesInjection())
-        inj.append(contentsOf: dirInjection())
+        // Skip dirInjection if we're handling it in styleInjections for paginated vertical text
+        if !isPaginatedVerticalText {
+            inj.append(contentsOf: dirInjection())
+        }
         try inj.append(contentsOf: langInjections(for: document))
+
+
         return inj
     }
 
@@ -131,8 +142,53 @@ extension ReadiumCSS: HTMLInjectable {
         // https://github.com/readium/r2-navigator-kotlin/issues/193
         inj.append(.style("audio[controls] { width: revert; height: revert; }"))
 
-        // Force horizontal writing mode to override publisher styles
-        inj.append(.style("html * { writing-mode: horizontal-tb !important; text-orientation: mixed !important; }"))
+        // Force writing mode based on settings
+        let isPaginated = userProperties.view == .paged
+        let isVerticalText = userProperties.overrides["--USER__writingMode"] as? String == "vertical-rl"
+
+        if isVerticalText && isPaginated {
+            // DEBUG: Log what we're doing
+            print("📘 [ReadiumCSS] Applying PAGINATED VERTICAL TEXT mode")
+            print("📘 [ReadiumCSS] isPaginated: \(isPaginated), isVerticalText: \(isVerticalText)")
+
+            // CRITICAL FIX: For paginated vertical text:
+            // - Keep html/body in horizontal-tb to maintain horizontal column layout
+            // - Apply vertical-rl only to CONTENT elements (body > *)
+            // - This prevents columns from stacking vertically
+            let verticalCSS = """
+            html {
+                writing-mode: horizontal-tb !important;
+                overflow-x: hidden !important;
+            }
+            body {
+                writing-mode: horizontal-tb !important;
+                direction: rtl !important;
+                overflow-x: visible !important;
+            }
+            body > * {
+                writing-mode: vertical-rl !important;
+                -webkit-writing-mode: vertical-rl !important;
+                display: block !important;
+            }
+            """
+            print("📘 [ReadiumCSS] Injecting CSS:\n\(verticalCSS)")
+            inj.append(.style(verticalCSS))
+            // Inject dir="rtl" for RTL page flow
+            print("📘 [ReadiumCSS] Injecting dir='rtl' on html and body")
+            inj.append(.dirAttribute(on: .html, rtl: true))
+            inj.append(.dirAttribute(on: .body, rtl: true))
+        } else if isVerticalText {
+            // Scroll mode: apply vertical writing mode to html/body
+            inj.append(.style("""
+            html, body {
+                writing-mode: vertical-rl !important;
+                -webkit-writing-mode: vertical-rl !important;
+            }
+            """))
+        } else {
+            // Force horizontal writing mode for non-vertical text
+            inj.append(.style("html * { writing-mode: horizontal-tb !important; text-orientation: mixed !important; }"))
+        }
 
         return inj
     }

@@ -18,6 +18,8 @@ import {
   scrollToLocator,
   setProperty,
   setCSSProperties,
+  isVerticalWritingMode,
+  isRTL,
 } from "./utils";
 import { getDecorations, registerTemplates } from "./decorator";
 
@@ -32,6 +34,8 @@ global.readium = {
   setCSSProperties: setCSSProperties,
   setProperty: setProperty,
   removeProperty: removeProperty,
+  isVerticalWritingMode: isVerticalWritingMode,
+  isRTL: isRTL,
 
   // decoration
   registerDecorationTemplates: registerTemplates,

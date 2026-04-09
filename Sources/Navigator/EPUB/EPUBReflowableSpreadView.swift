@@ -79,8 +79,25 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
     override func applySettings() {
         super.applySettings()
 
-        // Disables paginated mode if scroll is on.
-        scrollView.isPagingEnabled = !viewModel.scroll
+        let isVertical = viewModel.settings.verticalText
+        let isPaginated = !viewModel.settings.scroll
+
+        // Configure scroll view paging
+        scrollView.isPagingEnabled = isPaginated
+
+        if isPaginated {
+            // Paginated mode: ALWAYS horizontal paging (both LTR and RTL/vertical)
+            scrollView.alwaysBounceHorizontal = true
+            scrollView.alwaysBounceVertical = false
+        } else if isVertical {
+            // Vertical text scroll mode: horizontal scrolling
+            scrollView.alwaysBounceHorizontal = true
+            scrollView.alwaysBounceVertical = false
+        } else {
+            // Horizontal text scroll mode: vertical scrolling (default)
+            scrollView.alwaysBounceVertical = true
+            scrollView.alwaysBounceHorizontal = false
+        }
 
         updateContentInset()
     }
@@ -175,39 +192,54 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
         guard !viewModel.scroll else {
             return await super.go(to: direction, options: options)
         }
-        
-        // FIXED: Use our own JavaScript implementation for consistent LTR pagination
-        // regardless of the original document direction
+
+        let isVertical = viewModel.settings.verticalText
+
+        // For vertical text (RTL), the scrolling direction is inverted
+        // - Left swipe = next page (scroll more negative)
+        // - Right swipe = previous page (scroll less negative)
         switch direction {
-        case .left: // Always means previous page in our forced LTR model
-            // Use forcedLTR to override any RTL behavior in the content
+        case .left:
             let script = """
             (function() {
-                // Force LTR pagination regardless of document direction
-                const forcedLTR = true;
-                // Get current scroll position
+                const isVertical = readium.isVerticalWritingMode ? readium.isVerticalWritingMode() : false;
                 const currentOffset = window.scrollX;
-                // Get page width (viewport width)
                 const pageWidth = document.documentElement.clientWidth;
-                
-                // In LTR mode, scrollLeft means going to previous page
-                const newOffset = currentOffset - pageWidth;
-                
-                // Check if we can scroll (are we at the beginning?)
-                if (newOffset < 0) {
-                    return false;
+                const totalWidth = document.documentElement.scrollWidth;
+
+                console.log('📘 [go.left] isVertical:', isVertical, 'currentOffset:', currentOffset, 'pageWidth:', pageWidth);
+
+                if (isVertical) {
+                    // RTL vertical text: left swipe = next page (scroll more negative)
+                    const newOffset = currentOffset - pageWidth;
+                    const minOffset = -(totalWidth - pageWidth);
+
+                    console.log('📘 [go.left] RTL mode: newOffset:', newOffset, 'minOffset:', minOffset);
+
+                    if (newOffset < minOffset) {
+                        console.log('📘 [go.left] At end of chapter (RTL)');
+                        return false;
+                    }
+
+                    window.scrollTo({ left: newOffset, behavior: 'smooth' });
+                    return true;
+                } else {
+                    // LTR horizontal text: left swipe = previous page
+                    const newOffset = currentOffset - pageWidth;
+
+                    console.log('📘 [go.left] LTR mode: newOffset:', newOffset);
+
+                    if (newOffset < 0) {
+                        console.log('📘 [go.left] At start of chapter (LTR)');
+                        return false;
+                    }
+
+                    window.scrollTo({ left: newOffset, behavior: 'smooth' });
+                    return true;
                 }
-                
-                // Perform the scroll
-                window.scrollTo({
-                    left: newOffset,
-                    behavior: 'smooth'
-                });
-                
-                return true;
             })();
             """
-            
+
             let result = await evaluateScript(script)
             switch result {
             case .success(let value):
@@ -216,43 +248,52 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
                 }
                 try? await Task.sleep(seconds: 0.3)
                 return true
-                
+
             case .failure(let error):
                 log(.error, error)
                 return false
             }
-            
-        case .right: // Always means next page in our forced LTR model
-            // Use forcedLTR to override any RTL behavior in the content
+
+        case .right:
             let script = """
             (function() {
-                // Force LTR pagination regardless of document direction
-                const forcedLTR = true;
-                // Get current scroll position
+                const isVertical = readium.isVerticalWritingMode ? readium.isVerticalWritingMode() : false;
                 const currentOffset = window.scrollX;
-                // Get page width (viewport width)
                 const pageWidth = document.documentElement.clientWidth;
-                // Get total content width
                 const totalWidth = document.documentElement.scrollWidth;
-                
-                // In LTR mode, scrollRight means going to next page
-                const newOffset = currentOffset + pageWidth;
-                
-                // Check if we can scroll (are we at the end?)
-                if (newOffset >= totalWidth) {
-                    return false;
+
+                console.log('📘 [go.right] isVertical:', isVertical, 'currentOffset:', currentOffset, 'pageWidth:', pageWidth);
+
+                if (isVertical) {
+                    // RTL vertical text: right swipe = previous page (scroll less negative)
+                    const newOffset = currentOffset + pageWidth;
+
+                    console.log('📘 [go.right] RTL mode: newOffset:', newOffset);
+
+                    if (newOffset > 0) {
+                        console.log('📘 [go.right] At start of chapter (RTL)');
+                        return false;
+                    }
+
+                    window.scrollTo({ left: newOffset, behavior: 'smooth' });
+                    return true;
+                } else {
+                    // LTR horizontal text: right swipe = next page
+                    const newOffset = currentOffset + pageWidth;
+
+                    console.log('📘 [go.right] LTR mode: newOffset:', newOffset);
+
+                    if (newOffset >= totalWidth) {
+                        console.log('📘 [go.right] At end of chapter (LTR)');
+                        return false;
+                    }
+
+                    window.scrollTo({ left: newOffset, behavior: 'smooth' });
+                    return true;
                 }
-                
-                // Perform the scroll
-                window.scrollTo({
-                    left: newOffset,
-                    behavior: 'smooth'
-                });
-                
-                return true;
             })();
             """
-            
+
             let result = await evaluateScript(script)
             switch result {
             case .success(let value):
@@ -261,7 +302,7 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
                 }
                 try? await Task.sleep(seconds: 0.3)
                 return true
-                
+
             case .failure(let error):
                 log(.error, error)
                 return false
@@ -379,31 +420,39 @@ final class EPUBReflowableSpreadView: EPUBSpreadView {
             await evaluateScript(script)
             return true
         } else {
-            // FIXED: For pagination mode, ensure we snap to page boundaries
-            // This ensures when restoring progress, we're properly aligned
+            // For pagination mode, ensure we snap to page boundaries
             let script = """
             (function() {
-                // Force LTR pagination regardless of document direction
-                // Get page width (viewport width) for calculations
+                const isVertical = readium.isVerticalWritingMode ? readium.isVerticalWritingMode() : false;
                 const pageWidth = document.documentElement.clientWidth;
-                const maxScroll = document.documentElement.scrollWidth - pageWidth;
-                
-                // Calculate the raw scroll position from progression
-                let targetPosition = Math.max(0, Math.min(maxScroll, maxScroll * \(progression)));
-                
-                // Now adjust to snap to page boundaries - this is the key fix
-                // Calculate which page we should be on
-                const pageNumber = Math.floor(targetPosition / pageWidth);
-                
-                // Snap to exact page boundary
-                targetPosition = pageNumber * pageWidth;
-                
-                // Perform the scroll with 'auto' (not smooth) for immediate positioning
+                const totalWidth = document.documentElement.scrollWidth;
+                const maxScroll = totalWidth - pageWidth;
+
+                console.log('📘 [scroll] toProgression:', \(progression), 'isVertical:', isVertical, 'totalWidth:', totalWidth, 'pageWidth:', pageWidth);
+
+                let targetPosition;
+
+                if (isVertical) {
+                    // RTL vertical text: progression 0 = rightmost (most negative)
+                    // progression 1 = leftmost (scrollX = 0)
+                    const pageNumber = Math.floor(\(progression) * (maxScroll / pageWidth));
+                    // In RTL, we count from the right, so invert the position
+                    targetPosition = -(maxScroll - (pageNumber * pageWidth));
+
+                    console.log('📘 [scroll] RTL mode: pageNumber:', pageNumber, 'targetPosition:', targetPosition);
+                } else {
+                    // LTR horizontal text: progression 0 = leftmost (scrollX = 0)
+                    const pageNumber = Math.floor(\(progression) * (maxScroll / pageWidth));
+                    targetPosition = pageNumber * pageWidth;
+
+                    console.log('📘 [scroll] LTR mode: pageNumber:', pageNumber, 'targetPosition:', targetPosition);
+                }
+
                 window.scrollTo({
                     left: targetPosition,
                     behavior: 'auto'
                 });
-                
+
                 // Make sure we trigger a progression update after scrolling
                 if (window.reportProgression) {
                     setTimeout(window.reportProgression, 100);

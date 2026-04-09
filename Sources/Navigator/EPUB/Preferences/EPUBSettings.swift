@@ -95,8 +95,29 @@ public struct EPUBSettings: ConfigurableSettings {
         self.typeScale = typeScale
         self.verticalText = verticalText
         self.wordSpacing = wordSpacing
-        // Force horizontal LTR layout for CSS regardless of the computed settings based on metadata/language.
-        cssLayout = CSSLayout(verticalText: false, language: language, readingProgression: .ltr)
+        // For paginated vertical text:
+        // - Use DEFAULT stylesheet for standard horizontal column layout
+        // - We'll apply dir="rtl" and vertical writing mode via inline CSS
+        // - This keeps columns flowing horizontally (left-to-right in DOM, right-to-left visually)
+        // Only use cjk-vertical stylesheet for scroll mode
+        let useVerticalLayout = verticalText && scroll
+        let effectiveProgression: ReadingProgression
+        if verticalText && !scroll {
+            // Paginated vertical text: force LTR to get default column layout
+            // Direction will be handled by dir attribute injection
+            effectiveProgression = .ltr
+        } else if verticalText {
+            // Scroll vertical text: use RTL
+            effectiveProgression = .rtl
+        } else {
+            effectiveProgression = readingProgression
+        }
+
+        cssLayout = CSSLayout(
+            verticalText: useVerticalLayout,
+            language: language,
+            readingProgression: effectiveProgression
+        )
     }
 
     init(preferences: EPUBPreferences, defaults: EPUBDefaults, metadata: Metadata) {
@@ -125,15 +146,11 @@ public struct EPUBSettings: ConfigurableSettings {
             ?? language?.verticalText(for: readingProgression)
             ?? false
 
-        var scroll = preferences.scroll
+        let scroll = preferences.scroll
             ?? defaults.scroll
             ?? false
 
-        /// We disable pagination with vertical text, because CSS columns don't support it properly.
-        /// See https://github.com/readium/swift-toolkit/discussions/370
-        if verticalText {
-            scroll = true
-        }
+        // Vertical text now supports both scroll and paginated modes
 
         self.init(
             backgroundColor: preferences.backgroundColor,

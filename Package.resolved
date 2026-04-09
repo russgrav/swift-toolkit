@@ -1,5 +1,5 @@
 {
-  "originHash" : "87cce80491a9847873ff6aac7ef3e6cb3cb5beea04b23a6daaf6e4948337b07d",
+  "originHash" : "0763977ee6edf705ccff17f76d51b1be5d08ec6db45ec94b9d392a5e09682fe5",
   "pins" : [
     {
       "identity" : "cryptoswift",
@@ -35,6 +35,33 @@
       "state" : {
         "revision" : "584db89a4c3c3be27206cce6afde037b2b6e38d8",
         "version" : "4.0.1"
+      }
+    },
+    {
+      "identity" : "grdb.swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/groue/GRDB.swift.git",
+      "state" : {
+        "revision" : "2cf6c756e1e5ef6901ebae16576a7e4e4b834622",
+        "version" : "6.29.3"
+      }
+    },
+    {
+      "identity" : "kingfisher",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/onevcat/Kingfisher.git",
+      "state" : {
+        "revision" : "1a0c2df04b31ed7aa318354f3583faea24f006fc",
+        "version" : "5.15.8"
+      }
+    },
+    {
+      "identity" : "mbprogresshud",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jdg/MBProgressHUD.git",
+      "state" : {
+        "revision" : "bca42b801100b2b3a4eda0ba8dd33d858c780b0d",
+        "version" : "1.2.0"
       }
     },
     {
